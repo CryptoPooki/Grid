@@ -3,11 +3,13 @@
 //|                                         Dynamic Bollinger grid   |
 //+------------------------------------------------------------------+
 #property copyright "Grid"
-#property version   "1.08"
+#property version   "1.13"
 #property description "Writes balance, equity, and floating profit on a chosen timeframe."
 #property description "Dynamic grid on 4H EMA Bollinger Bands (length 21, 3 standard deviations)."
 #property description "Limit orders only. Buy levels above the ask are skipped. Sell levels below the bid are skipped."
-#property description "Flattens the book around high-impact EUR and USD calendar events."
+#property description "Flattens the book around selected high-impact EUR and USD releases."
+#property description "Flattens the book outside the symbol trade sessions, and across Saturday and Sunday."
+#property description "When the session reopens, the closed positions return with the same volume and take profit."
 
 #include <Trade/Trade.mqh>
 
@@ -31,16 +33,13 @@ input group "Grid"
 input int    InpGridLevels        = 20;   // Orders on each side
 input double InpTakeProfitPercent = 0.1;  // Take profit, percent of entry
 
-input group "Open loss"
-input double InpReduceOnlyGap = 0.0; // Reduce-only gap, account currency (0 = off)
-input double InpFlattenGap    = 0.0; // Flatten gap, account currency (0 = off)
-
 input group "News blackout"
-input bool                 InpNewsBlackout      = true;             // Flatten around high-impact news
-input ENUM_NEWS_CURRENCIES InpNewsCurrencies    = NEWS_USD_AND_EUR; // News currencies
-input int                  InpNewsMinutesBefore = 5;                // Minutes before the event
-input int                  InpNewsMinutesAfter  = 5;                // Minutes after the event
-input bool InpNewsWholeAccount   = true; // Clear every order and position on the account
+input bool                 InpNewsBlackout    = true;             // Flatten around high-impact news
+input ENUM_NEWS_CURRENCIES InpNewsCurrencies  = NEWS_USD_AND_EUR; // News currencies
+input bool                 InpNewsWholeAccount = true;            // Clear every order and position on the account
+
+input group "Session blackout"
+input bool InpSessionBlackout = true; // Flatten outside the symbol trade sessions
 
 input group "Equity record"
 input bool            InpEquityLog       = true;      // Save the equity curve to a file
@@ -53,8 +52,9 @@ input int  InpMaintainSeconds        = 2;      // How often to check the grid, s
 input bool InpDrawGrid               = true;   // Draw bands and order levels
 input bool InpDeletePendingOnRemove  = false;  // Delete pending orders when the EA is removed
 
-#define OBJ_PREFIX          "BBG."
+#define OBJ_PREFIX            "BBG."
 #define MAX_REQUESTS_PER_PASS 10
+#define BLACKOUT_SECONDS      300
 
 CTrade   g_trade;
 int      g_maHandle = INVALID_HANDLE;
@@ -68,8 +68,6 @@ datetime g_pauseTradingUntil = 0;
 bool     g_realign = false;
 bool     g_reduceBuy = false;
 bool     g_reduceSell = false;
-datetime g_flattenHoldBuyBar = 0;
-datetime g_flattenHoldSellBar = 0;
 double   g_openLoss = 0.0;
 double   g_buyFloating = 0.0;
 double   g_sellFloating = 0.0;
@@ -92,6 +90,14 @@ string   g_newsCurrency;
 datetime g_nextNewsTime = 0;
 string   g_nextNewsName;
 string   g_nextNewsCurrency;
+bool     g_inSessionBlackout = false;
+bool     g_sessionSpecOk = true;
+string   g_sessionStatus;
+bool     g_holdRestore = false;
+bool     g_restoring = false;
+bool     g_bookCaptured = false;
+int      g_savedCount = 0;
+int      g_savedCursor = 0;
 int      g_equityHandle = INVALID_HANDLE;
 string   g_equityFile;
 datetime g_equitySampleBar = 0;
@@ -110,6 +116,18 @@ struct SyncStats
    int modified;
    int deleted;
 };
+
+struct SavedPosition
+{
+   bool   isBuy;
+   double lots;
+   double openPrice;
+   double tp;
+   double sl;
+   string comment;
+};
+
+SavedPosition g_savedPositions[];
 
 //+------------------------------------------------------------------+
 //| Small helpers                                                    |
@@ -553,6 +571,13 @@ bool SendOnce(const ENUM_ORDER_TYPE type, const double lots, const double price,
    return false;
 }
 
+bool SendMarket(const bool isBuy, const double lots, const double sl, const double tp, const string comment)
+{
+   if(isBuy)
+      return g_trade.Buy(lots, _Symbol, 0.0, sl, tp, comment);
+   return g_trade.Sell(lots, _Symbol, 0.0, sl, tp, comment);
+}
+
 bool PlacePending(const ENUM_ORDER_TYPE type, const double lots, const double price,
                   const double tp, const string comment)
 {
@@ -675,11 +700,14 @@ int DeleteUnexpectedPending()
 //+------------------------------------------------------------------+
 //| Keep one pending order at one band level                         |
 //+------------------------------------------------------------------+
+double ReduceOnlyGap()
+{
+   return (AccountInfoDouble(ACCOUNT_EQUITY) - InpEquityReserve) / 2.0;
+}
+
 bool SideBlocked(const bool isBuy)
 {
-   if(isBuy)
-      return g_reduceBuy || (g_flattenHoldBuyBar != 0 && g_flattenHoldBuyBar == g_barTime);
-   return g_reduceSell || (g_flattenHoldSellBar != 0 && g_flattenHoldSellBar == g_barTime);
+   return isBuy ? g_reduceBuy : g_reduceSell;
 }
 
 double SideFloating(const bool isBuy)
@@ -705,107 +733,41 @@ void RefreshOpenLoss()
    g_openLoss = (floating < 0.0) ? -floating : 0.0;
 }
 
-int FlattenSide(const bool isBuy)
-{
-   if(isBuy)
-   {
-      g_reduceBuy = true;
-      g_flattenHoldBuyBar = g_barTime;
-   }
-   else
-   {
-      g_reduceSell = true;
-      g_flattenHoldSellBar = g_barTime;
-   }
-
-   const long wanted = isBuy ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
-   int closed = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; --i)
-   {
-      const ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || !IsOurPosition())
-         continue;
-      if(PositionGetInteger(POSITION_TYPE) != wanted)
-         continue;
-      if(!ConsumeRequest())
-         break;
-      if(!g_trade.PositionClose(ticket, (ulong)InpSlippagePoints))
-      {
-         LogError(StringFormat("Could not close %s position %I64u: %s",
-                               isBuy ? "buy" : "sell",
-                               ticket,
-                               g_trade.ResultRetcodeDescription()));
-         PauseAfterTradeError();
-         break;
-      }
-      closed++;
-   }
-
-   if(closed > 0)
-   {
-      PrintFormat("DynamicGridBB flattened %d %s position(s). Open loss was %s.",
-                  closed,
-                  isBuy ? "buy" : "sell",
-                  DoubleToString(g_openLoss, MoneyDigits()));
-   }
-   return closed;
-}
-
 void UpdateRiskMode()
 {
-   if(g_flattenHoldBuyBar != 0 && g_flattenHoldBuyBar != g_barTime)
-      g_flattenHoldBuyBar = 0;
-   if(g_flattenHoldSellBar != 0 && g_flattenHoldSellBar != g_barTime)
-      g_flattenHoldSellBar = 0;
-
    const bool wasReduceBuy = g_reduceBuy;
    const bool wasReduceSell = g_reduceSell;
    RefreshOpenLoss();
+   const double gap = ReduceOnlyGap();
 
-   if(InpReduceOnlyGap > 0.0 && g_openLoss >= InpReduceOnlyGap)
+   if(gap <= 0.0)
    {
-      if(g_buyFloating < 0.0)
-         g_reduceBuy = true;
-      else if(g_flattenHoldBuyBar == 0)
-         g_reduceBuy = false;
-
-      if(g_sellFloating < 0.0)
-         g_reduceSell = true;
-      else if(g_flattenHoldSellBar == 0)
-         g_reduceSell = false;
+      g_reduceBuy = true;
+      g_reduceSell = true;
    }
-   else if(InpReduceOnlyGap > 0.0 && g_openLoss < InpReduceOnlyGap)
+   else if(g_openLoss >= gap)
    {
-      if(g_flattenHoldBuyBar == 0)
-         g_reduceBuy = false;
-      if(g_flattenHoldSellBar == 0)
-         g_reduceSell = false;
+      g_reduceBuy = (g_buyFloating < 0.0);
+      g_reduceSell = (g_sellFloating < 0.0);
    }
    else
    {
-      if(g_flattenHoldBuyBar == 0)
-         g_reduceBuy = false;
-      if(g_flattenHoldSellBar == 0)
-         g_reduceSell = false;
+      g_reduceBuy = false;
+      g_reduceSell = false;
    }
 
    if(g_reduceBuy && !wasReduceBuy)
-      PrintFormat("DynamicGridBB reduce-only on buys. Open loss %s.", DoubleToString(g_openLoss, MoneyDigits()));
+      PrintFormat("DynamicGridBB reduce-only on buys. Open loss %s, gap %s.",
+                  DoubleToString(g_openLoss, MoneyDigits()),
+                  DoubleToString(gap, MoneyDigits()));
    if(g_reduceSell && !wasReduceSell)
-      PrintFormat("DynamicGridBB reduce-only on sells. Open loss %s.", DoubleToString(g_openLoss, MoneyDigits()));
+      PrintFormat("DynamicGridBB reduce-only on sells. Open loss %s, gap %s.",
+                  DoubleToString(g_openLoss, MoneyDigits()),
+                  DoubleToString(gap, MoneyDigits()));
    if(!g_reduceBuy && wasReduceBuy)
       Print("DynamicGridBB buys can place orders again.");
    if(!g_reduceSell && wasReduceSell)
       Print("DynamicGridBB sells can place orders again.");
-
-   if(InpFlattenGap > 0.0 && g_openLoss >= InpFlattenGap)
-   {
-      if(g_buyFloating < 0.0)
-         FlattenSide(true);
-      if(g_sellFloating < 0.0)
-         FlattenSide(false);
-      RefreshOpenLoss();
-   }
 }
 
 void SyncLevel(const bool isBuy, const int index, const bool realign, SyncStats &stats)
@@ -1027,6 +989,34 @@ bool ManagedByNews(const bool wholeAccount, const bool position)
    return position ? IsOurPosition() : IsOurOrder();
 }
 
+bool NewsEventWanted(const string name)
+{
+   string key = name;
+   StringTrimLeft(key);
+   StringTrimRight(key);
+   StringToLower(key);
+
+   if(key == "unemployment rate" || StringFind(key, "unemployment rate ") == 0)
+      return true;
+   if(StringFind(key, "nonfarm payroll") == 0)
+      return true;
+   if(key == "initial jobless claims")
+      return true;
+   if(StringFind(key, "fomc press conference") >= 0)
+      return true;
+   if(StringFind(key, "fomc meeting minutes") >= 0 || key == "fomc minutes")
+      return true;
+   if(StringFind(key, "fed interest rate") >= 0)
+      return true;
+   if(StringFind(key, "median cpi") >= 0)
+      return false;
+   if(StringFind(key, "core cpi") == 0)
+      return true;
+   if(key == "cpi" || StringFind(key, "cpi ") == 0)
+      return true;
+   return false;
+}
+
 void RefreshNewsCache()
 {
    if(!InpNewsBlackout)
@@ -1037,8 +1027,8 @@ void RefreshNewsCache()
    }
 
    const datetime now = TimeCurrent();
-   const int beforeSec = InpNewsMinutesBefore * 60;
-   const int afterSec = InpNewsMinutesAfter * 60;
+   const int beforeSec = BLACKOUT_SECONDS;
+   const int afterSec = BLACKOUT_SECONDS;
 
    MqlCalendarValue values[];
    ResetLastError();
@@ -1080,6 +1070,8 @@ void RefreshNewsCache()
          continue;
       if(!NewsCurrency(country.currency))
          continue;
+      if(!NewsEventWanted(event.name))
+         continue;
 
       const datetime eventTime = values[i].time;
       const datetime blackoutFrom = eventTime - beforeSec;
@@ -1116,7 +1108,7 @@ void RefreshNewsCache()
                   TimeToString(g_newsTo, TIME_DATE | TIME_MINUTES));
    }
    if(!nowInNews && g_inNews)
-      Print("DynamicGridBB news blackout finished. The grid can place orders again.");
+      Print("DynamicGridBB news blackout finished.");
    g_inNews = nowInNews;
 }
 
@@ -1185,13 +1177,584 @@ string NewsStatus()
    }
    if(g_nextNewsTime > 0)
    {
-      return StringFormat("Next high %s news: %s %s at %s",
+      return StringFormat("Next matching %s news: %s %s at %s",
                           NewsCurrencyLabel(),
                           g_nextNewsCurrency,
                           g_nextNewsName,
                           TimeToString(g_nextNewsTime, TIME_DATE | TIME_MINUTES));
    }
-   return "No high-impact " + NewsCurrencyLabel() + " news in the next 48 hours";
+   return "No matching high-impact " + NewsCurrencyLabel() + " news in the next 48 hours";
+}
+
+int ClockSeconds(const datetime value, const bool isEnd)
+{
+   if(isEnd && value > 0 && (value % 86400) == 0)
+      return 86400;
+   if(value <= 0)
+      return 0;
+   if(value < 86400)
+      return (int)value;
+   return (int)(value % 86400);
+}
+
+bool ReadTradeSession(const ENUM_DAY_OF_WEEK day, const uint index, int &start, int &end)
+{
+   datetime from = 0;
+   datetime to = 0;
+   if(!SymbolInfoSessionTrade(_Symbol, day, index, from, to))
+      return false;
+   start = ClockSeconds(from, false);
+   end = ClockSeconds(to, true);
+   return true;
+}
+
+bool SymbolHasTradeSessions()
+{
+   for(int day = 0; day < 7; ++day)
+   {
+      int start = 0;
+      int end = 0;
+      if(ReadTradeSession((ENUM_DAY_OF_WEEK)day, 0, start, end))
+         return true;
+   }
+   return false;
+}
+
+string ClockText(const int seconds)
+{
+   if(seconds >= 86400)
+      return "24:00";
+   const int clamped = MathMax(0, seconds);
+   return StringFormat("%02d:%02d", clamped / 3600, (clamped % 3600) / 60);
+}
+
+string WeekdayName(const int dayOfWeek)
+{
+   const string names[7] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+   if(dayOfWeek < 0 || dayOfWeek > 6)
+      return "";
+   return names[dayOfWeek];
+}
+
+bool TradableSession(const int start, const int end, int &openAt, int &closeAt)
+{
+   const int afterSec = BLACKOUT_SECONDS;
+   const int beforeSec = BLACKOUT_SECONDS;
+   if(end <= start)
+      return false;
+   openAt = start + afterSec;
+   closeAt = end - beforeSec;
+   return closeAt > openAt;
+}
+
+bool InTradableWindow(const ENUM_DAY_OF_WEEK day, const int secondOfDay, int &closesAt)
+{
+   bool inside = false;
+   for(uint index = 0; index < 8; ++index)
+   {
+      int start = 0;
+      int end = 0;
+      if(!ReadTradeSession(day, index, start, end))
+         break;
+
+      int openAt = 0;
+      int closeAt = 0;
+      if(!TradableSession(start, end, openAt, closeAt))
+         continue;
+      if(secondOfDay >= openAt && secondOfDay < closeAt)
+      {
+         inside = true;
+         closesAt = closeAt;
+      }
+   }
+   return inside;
+}
+
+bool NextSessionOpen(int &dayOffset, int &openAt)
+{
+   MqlDateTime now;
+   TimeToStruct(TimeCurrent(), now);
+   const int secondOfDay = now.hour * 3600 + now.min * 60 + now.sec;
+
+   for(int add = 0; add < 8; ++add)
+   {
+      const int day = (now.day_of_week + add) % 7;
+      if(day == SUNDAY || day == SATURDAY)
+         continue;
+
+      int earliest = -1;
+      for(uint index = 0; index < 8; ++index)
+      {
+         int start = 0;
+         int end = 0;
+         if(!ReadTradeSession((ENUM_DAY_OF_WEEK)day, index, start, end))
+            break;
+
+         int opens = 0;
+         int closes = 0;
+         if(!TradableSession(start, end, opens, closes))
+            continue;
+         if(add == 0 && opens <= secondOfDay)
+            continue;
+         if(earliest < 0 || opens < earliest)
+            earliest = opens;
+      }
+
+      if(earliest >= 0)
+      {
+         dayOffset = add;
+         openAt = earliest;
+         return true;
+      }
+   }
+   return false;
+}
+
+string NextSessionText()
+{
+   int dayOffset = 0;
+   int openAt = 0;
+   if(!NextSessionOpen(dayOffset, openAt))
+      return "No coming trade session in the specification.";
+
+   MqlDateTime now;
+   TimeToStruct(TimeCurrent(), now);
+   const int day = (now.day_of_week + dayOffset) % 7;
+   if(dayOffset == 0)
+      return "Grid returns at " + ClockText(openAt);
+   return "Grid returns " + WeekdayName(day) + " at " + ClockText(openAt);
+}
+
+void RefreshSessionState()
+{
+   if(!InpSessionBlackout)
+   {
+      g_inSessionBlackout = false;
+      g_sessionSpecOk = true;
+      g_sessionStatus = "Session blackout off";
+      return;
+   }
+
+   g_sessionSpecOk = SymbolHasTradeSessions();
+   MqlDateTime now;
+   TimeToStruct(TimeCurrent(), now);
+   const int secondOfDay = now.hour * 3600 + now.min * 60 + now.sec;
+   const bool weekend = (now.day_of_week == SUNDAY || now.day_of_week == SATURDAY);
+
+   int closesAt = 0;
+   const bool trading = (!weekend && g_sessionSpecOk && InTradableWindow((ENUM_DAY_OF_WEEK)now.day_of_week, secondOfDay, closesAt));
+   const bool blackout = weekend || (g_sessionSpecOk && !trading);
+
+   if(blackout && !g_inSessionBlackout)
+      Print("DynamicGridBB session blackout. Orders and positions will be cleared. " + NextSessionText());
+   if(!blackout && g_inSessionBlackout)
+      Print("DynamicGridBB session blackout finished.");
+   g_inSessionBlackout = blackout;
+
+   if(!g_sessionSpecOk)
+   {
+      g_sessionStatus = weekend
+                        ? "No trade sessions in the specification. Weekend flat. " + NextSessionText()
+                        : "No trade sessions in the specification. Weekday hours are not being used.";
+      return;
+   }
+   if(weekend)
+   {
+      g_sessionStatus = "Weekend flat. " + NextSessionText();
+      return;
+   }
+   if(trading)
+   {
+      g_sessionStatus = "Session open until " + ClockText(closesAt);
+      return;
+   }
+   g_sessionStatus = "Session flat. " + NextSessionText();
+}
+
+string CommentForSaved(const bool isBuy, const string comment, const double openPrice)
+{
+   string stored = comment;
+   if(StringLen(stored) > 31)
+      stored = StringSubstr(stored, 0, 31);
+   if(stored != "")
+      return stored;
+
+   int best = 0;
+   double bestDist = -1.0;
+   for(int i = 0; i < InpGridLevels; ++i)
+   {
+      const double dist = MathAbs(LevelPrice(isBuy, i) - openPrice);
+      if(bestDist < 0.0 || dist < bestDist)
+      {
+         best = i;
+         bestDist = dist;
+      }
+   }
+   return LevelComment(isBuy, best);
+}
+
+bool PositionCommentOpen(const string comment)
+{
+   if(comment == "")
+      return false;
+
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+   {
+      if(PositionGetTicket(i) == 0 || !IsOurPosition())
+         continue;
+      if(PositionGetString(POSITION_COMMENT) == comment)
+         return true;
+   }
+   return false;
+}
+
+// 1 = use tp, -1 = the saved target was already reached, 0 = no price yet.
+int SavedTakeProfit(const bool isBuy, const double savedTp, double &tp)
+{
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0.0 || tick.bid <= 0.0)
+      return 0;
+
+   const double entry = isBuy ? tick.ask : tick.bid;
+   if(savedTp <= 0.0)
+   {
+      tp = TakeProfitPrice(isBuy, entry);
+      return 1;
+   }
+   if(isBuy && savedTp <= entry)
+      return -1;
+   if(!isBuy && savedTp >= entry)
+      return -1;
+
+   tp = savedTp;
+   const double minDist = StopsDistance();
+   if(minDist > 0.0)
+   {
+      if(isBuy && (tp - entry) < minDist)
+         tp = entry + minDist;
+      if(!isBuy && (entry - tp) < minDist)
+         tp = entry - minDist;
+   }
+
+   tp = NormalizePrice(tp);
+   const double tickSize = TickSize();
+   if(isBuy && tp <= entry)
+      tp = NormalizePrice(entry + tickSize);
+   if(!isBuy && tp >= entry)
+      tp = NormalizePrice(entry - tickSize);
+   return 1;
+}
+
+double SavedStopLoss(const bool isBuy, const double savedSl)
+{
+   if(savedSl <= 0.0)
+      return 0.0;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0.0 || tick.bid <= 0.0)
+      return 0.0;
+
+   const double entry = isBuy ? tick.ask : tick.bid;
+   const double minDist = StopsDistance();
+   if(isBuy)
+   {
+      if(savedSl >= entry)
+         return 0.0;
+      if(minDist > 0.0 && (entry - savedSl) < minDist)
+         return 0.0;
+   }
+   else
+   {
+      if(savedSl <= entry)
+         return 0.0;
+      if(minDist > 0.0 && (savedSl - entry) < minDist)
+         return 0.0;
+   }
+   return NormalizePrice(savedSl);
+}
+
+void CaptureSessionBook()
+{
+   ArrayResize(g_savedPositions, 0);
+   g_savedCount = 0;
+   g_savedCursor = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+   {
+      const ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !IsOurPosition())
+         continue;
+
+      const bool isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      const int n = g_savedCount;
+      ArrayResize(g_savedPositions, n + 1);
+      g_savedPositions[n].isBuy = isBuy;
+      g_savedPositions[n].lots = PositionGetDouble(POSITION_VOLUME);
+      g_savedPositions[n].openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      g_savedPositions[n].tp = PositionGetDouble(POSITION_TP);
+      g_savedPositions[n].sl = PositionGetDouble(POSITION_SL);
+      g_savedPositions[n].comment = CommentForSaved(isBuy, PositionGetString(POSITION_COMMENT), g_savedPositions[n].openPrice);
+      g_savedCount++;
+   }
+
+   g_bookCaptured = true;
+   WriteSessionBookFile();
+   if(g_savedCount > 0)
+      PrintFormat("DynamicGridBB saved %d position(s) to restore after the session blackout.", g_savedCount);
+}
+
+string SessionBookFile()
+{
+   return StringFormat("DynamicGridBB_session_%s_%d.csv", _Symbol, InpMagic);
+}
+
+void DeleteSessionBookFile()
+{
+   const string name = SessionBookFile();
+   if(FileIsExist(name))
+      FileDelete(name);
+}
+
+void WriteSessionBookFile()
+{
+   if(g_savedCount <= 0)
+   {
+      DeleteSessionBookFile();
+      return;
+   }
+
+   const int handle = FileOpen(SessionBookFile(), FILE_WRITE | FILE_CSV | FILE_ANSI);
+   if(handle == INVALID_HANDLE)
+   {
+      Print("DynamicGridBB: could not save the session book. Error ", GetLastError());
+      return;
+   }
+
+   for(int i = 0; i < g_savedCount; ++i)
+   {
+      FileWrite(handle,
+                g_savedPositions[i].isBuy ? 1 : 0,
+                g_savedPositions[i].lots,
+                g_savedPositions[i].openPrice,
+                g_savedPositions[i].tp,
+                g_savedPositions[i].sl,
+                g_savedPositions[i].comment);
+   }
+   FileClose(handle);
+}
+
+void LoadSessionBookFile()
+{
+   const string name = SessionBookFile();
+   if(!FileIsExist(name))
+      return;
+
+   const int handle = FileOpen(name, FILE_READ | FILE_CSV | FILE_ANSI);
+   if(handle == INVALID_HANDLE)
+      return;
+
+   ArrayResize(g_savedPositions, 0);
+   g_savedCount = 0;
+   while(!FileIsEnding(handle))
+   {
+      const int side = (int)FileReadNumber(handle);
+      const double lots = FileReadNumber(handle);
+      const double openPrice = FileReadNumber(handle);
+      const double tp = FileReadNumber(handle);
+      const double sl = FileReadNumber(handle);
+      const string comment = FileReadString(handle);
+      if(lots <= 0.0 || comment == "")
+         continue;
+
+      const int n = g_savedCount;
+      ArrayResize(g_savedPositions, n + 1);
+      g_savedPositions[n].isBuy = (side != 0);
+      g_savedPositions[n].lots = lots;
+      g_savedPositions[n].openPrice = openPrice;
+      g_savedPositions[n].tp = tp;
+      g_savedPositions[n].sl = sl;
+      g_savedPositions[n].comment = comment;
+      g_savedCount++;
+   }
+   FileClose(handle);
+
+   if(g_savedCount <= 0)
+   {
+      DeleteSessionBookFile();
+      return;
+   }
+
+   g_bookCaptured = true;
+   g_savedCursor = 0;
+   g_holdRestore = true;
+   PrintFormat("DynamicGridBB loaded %d position(s) to restore after the session blackout.", g_savedCount);
+}
+
+void ClearSavedBook()
+{
+   g_bookCaptured = false;
+   g_savedCount = 0;
+   g_savedCursor = 0;
+   ArrayResize(g_savedPositions, 0);
+   DeleteSessionBookFile();
+}
+
+bool OpenRestored(const bool isBuy, const double lots, const double sl, const double tp, const string comment)
+{
+   const ENUM_ORDER_TYPE market = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick))
+      return false;
+   const double price = isBuy ? tick.ask : tick.bid;
+
+   double required = 0.0;
+   if(OrderCalcMargin(market, _Symbol, lots, price, required) &&
+      required > AccountInfoDouble(ACCOUNT_MARGIN_FREE))
+   {
+      LogError(StringFormat("Not enough free margin to restore %s. Need %s, free %s.",
+                            comment,
+                            DoubleToString(required, MoneyDigits()),
+                            DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_FREE), MoneyDigits())));
+      return false;
+   }
+
+   if(!ConsumeRequest())
+      return false;
+
+   ENUM_ORDER_TYPE_FILLING modes[3];
+   modes[0] = g_filling;
+   modes[1] = ORDER_FILLING_RETURN;
+   modes[2] = ORDER_FILLING_IOC;
+
+   for(int i = 0; i < 3; ++i)
+   {
+      if(i > 0 && modes[i] == modes[0])
+         continue;
+
+      g_trade.SetTypeFilling(modes[i]);
+      if(SendMarket(isBuy, lots, sl, tp, comment))
+      {
+         g_filling = modes[i];
+         return true;
+      }
+
+      if(g_trade.ResultRetcode() != TRADE_RETCODE_INVALID_FILL)
+      {
+         LogError(StringFormat("Could not restore %s (%s lots, TP %s): %s",
+                               comment,
+                               DoubleToString(lots, 4),
+                               DoubleToString(tp, _Digits),
+                               g_trade.ResultRetcodeDescription()));
+         PauseAfterTradeError();
+         return false;
+      }
+   }
+
+   LogError("Broker rejected the order filling mode.");
+   PauseAfterTradeError();
+   return false;
+}
+
+// One saved position per pass. Skipped legs do not use a trade request.
+// Returns false when this pass should stop before the fresh grid is placed.
+bool RestoreSavedPositions()
+{
+   while(g_savedCursor < g_savedCount)
+   {
+      const bool isBuy = g_savedPositions[g_savedCursor].isBuy;
+      const string comment = g_savedPositions[g_savedCursor].comment;
+      const double savedLots = g_savedPositions[g_savedCursor].lots;
+      const double savedTp = g_savedPositions[g_savedCursor].tp;
+      const double savedSl = g_savedPositions[g_savedCursor].sl;
+
+      if(PositionCommentOpen(comment))
+      {
+         g_savedCursor++;
+         continue;
+      }
+
+      const double lots = NormalizeVolumeDown(savedLots);
+      if(lots <= 0.0)
+      {
+         PrintFormat("DynamicGridBB dropped %s. Volume %s is below the minimum.",
+                     comment, DoubleToString(savedLots, 4));
+         g_savedCursor++;
+         continue;
+      }
+
+      double tp = 0.0;
+      const int target = SavedTakeProfit(isBuy, savedTp, tp);
+      if(target == 0)
+         return false;
+      if(target < 0)
+      {
+         PrintFormat("DynamicGridBB left %s closed. Price already reached its take profit during the blackout.",
+                     comment);
+         g_savedCursor++;
+         continue;
+      }
+
+      const double sl = SavedStopLoss(isBuy, savedSl);
+      if(!OpenRestored(isBuy, lots, sl, tp, comment))
+         return false;
+
+      PrintFormat("DynamicGridBB restored %s, %s lots, take profit %s, as it was before the session blackout.",
+                  comment,
+                  DoubleToString(lots, 2),
+                  DoubleToString(tp, _Digits));
+      g_savedCursor++;
+      return g_savedCursor < g_savedCount;
+   }
+   return false;
+}
+
+int DeleteSessionOrders()
+{
+   int deleted = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; --i)
+   {
+      const ulong ticket = OrderGetTicket(i);
+      if(ticket == 0 || !IsOurOrder())
+         continue;
+      if(!ConsumeRequest())
+         break;
+      if(g_trade.OrderDelete(ticket))
+         deleted++;
+      else
+         LogError(StringFormat("Could not delete order %I64u for the session blackout: %s",
+                               ticket, g_trade.ResultRetcodeDescription()));
+   }
+   return deleted;
+}
+
+int CloseSessionPositions()
+{
+   int closed = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+   {
+      const ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !IsOurPosition())
+         continue;
+      if(!ConsumeRequest())
+         break;
+      if(g_trade.PositionClose(ticket, (ulong)InpSlippagePoints))
+         closed++;
+      else
+         LogError(StringFormat("Could not close position %I64u for the session blackout: %s",
+                               ticket, g_trade.ResultRetcodeDescription()));
+   }
+   return closed;
+}
+
+void EnforceSessionBlackout()
+{
+   const int deleted = DeleteSessionOrders();
+   const int closed = CloseSessionPositions();
+   if(deleted + closed > 0)
+   {
+      PrintFormat("DynamicGridBB cleared %d order(s) and %d position(s) for the session blackout.",
+                  deleted, closed);
+   }
 }
 
 void ShowStatus(const string note)
@@ -1204,9 +1767,10 @@ void ShowStatus(const string note)
    const double gridMargin = InpGridLevels * (buyMoney + sellMoney);
    const string buyMode = SideBlocked(true) ? "reduce-only" : "trading";
    const string sellMode = SideBlocked(false) ? "reduce-only" : "trading";
-   string text = StringFormat("Dynamic BB grid  %s\nEquity now %s | Reserve %s\nGrid margin %s = snapshot equity %s - reserve\nBuy/order %s | Sell/order %s | Full grid %s | Free %s\nOpen loss %s | Buys %s | Sells %s\nReduce-only %s | Flatten %s | Buy %s | Sell %s\nLower %s | EMA %s | Upper %s\nPending %d | Positions %d | Bands from %s",
+   const double equityNow = AccountInfoDouble(ACCOUNT_EQUITY);
+   string text = StringFormat("Dynamic BB grid  %s\nEquity now %s | Reserve %s\nGrid margin %s = snapshot equity %s - reserve\nBuy/order %s | Sell/order %s | Full grid %s | Free %s\nOpen loss %s | Buys %s | Sells %s\nReduce-only gap %s = (equity - reserve) / 2 | Buy %s | Sell %s\nLower %s | EMA %s | Upper %s\nPending %d | Positions %d | Bands from %s",
                               _Symbol,
-                              DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY), digits),
+                              DoubleToString(equityNow, digits),
                               DoubleToString(InpEquityReserve, digits),
                               DoubleToString(g_margin, digits),
                               DoubleToString(g_equityAtRefresh, digits),
@@ -1217,8 +1781,7 @@ void ShowStatus(const string note)
                               DoubleToString(g_openLoss, digits),
                               DoubleToString(g_buyFloating, digits),
                               DoubleToString(g_sellFloating, digits),
-                              (InpReduceOnlyGap > 0.0 ? DoubleToString(InpReduceOnlyGap, digits) : "off"),
-                              (InpFlattenGap > 0.0 ? DoubleToString(InpFlattenGap, digits) : "off"),
+                              DoubleToString(ReduceOnlyGap(), digits),
                               buyMode,
                               sellMode,
                               DoubleToString(g_lower, _Digits),
@@ -1228,6 +1791,14 @@ void ShowStatus(const string note)
                               CountOur(true),
                               closedBar > 0 ? TimeToString(closedBar, TIME_DATE | TIME_MINUTES) : "-");
    text += "\n" + NewsStatus();
+   text += "\n" + g_sessionStatus;
+   if(g_inSessionBlackout && g_savedCount > 0)
+      text += StringFormat("\n%d position(s) saved for the session reopen.", g_savedCount);
+   if(g_restoring && g_savedCount > 0 && g_savedCursor < g_savedCount)
+      text += StringFormat("\nRestoring position %d of %d from before the session blackout.",
+                           g_savedCursor + 1, g_savedCount);
+   else if(g_restoring)
+      text += "\nRestoring the grid, one order per second.";
    if(InpEquityLog && g_equityFile != "")
       text += "\nEquity record: " + g_equityFile;
    if(note != "")
@@ -1251,18 +1822,31 @@ void RunGrid()
 
    DrawGrid();
    RefreshNewsCache();
+   RefreshSessionState();
 
-   if(g_inNews)
+   if(g_inNews || g_inSessionBlackout)
    {
+      g_holdRestore = true;
+      g_restoring = false;
       if(!TradingAllowed())
       {
          RefreshOpenLoss();
-         ShowStatus("News window, but AutoTrading is off. Orders and positions were not cleared.");
+         ShowStatus("Blackout window, but AutoTrading is off. Orders and positions were not cleared.");
          return;
       }
 
+      if(g_inSessionBlackout)
+      {
+         if(!g_bookCaptured)
+            CaptureSessionBook();
+         g_savedCursor = 0;
+      }
+
       g_requestsLeft = 100;
-      EnforceNewsBlackout();
+      if(g_inNews)
+         EnforceNewsBlackout();
+      if(g_inSessionBlackout)
+         EnforceSessionBlackout();
       RefreshOpenLoss();
       ShowStatus("");
       return;
@@ -1285,11 +1869,46 @@ void RunGrid()
 
    if(g_margin <= 0.0)
    {
+      if(g_savedCount <= 0)
+      {
+         g_holdRestore = false;
+         g_restoring = false;
+         ClearSavedBook();
+      }
       const int deleted = DeleteAllOurPending();
       ShowStatus("Equity is at or below the reserve. No new grid orders.");
       if(deleted > 0)
          PrintFormat("DynamicGridBB removed %d pending orders because margin is %.2f.", deleted, g_margin);
       return;
+   }
+
+   if(g_holdRestore)
+   {
+      g_holdRestore = false;
+      g_restoring = true;
+      g_savedCursor = 0;
+      if(g_savedCount > 0)
+         PrintFormat("DynamicGridBB is restoring %d position(s) from before the session blackout, one position per second.",
+                     g_savedCount);
+      else
+      {
+         ClearSavedBook();
+         Print("DynamicGridBB is restoring the grid, one order per second.");
+      }
+   }
+   if(g_restoring)
+      g_requestsLeft = 1;
+
+   if(g_savedCount > 0 && g_savedCursor < g_savedCount)
+   {
+      RestoreSavedPositions();
+      if(g_savedCursor < g_savedCount)
+      {
+         ShowStatus("");
+         return;
+      }
+      Print("DynamicGridBB restored the positions from before the session blackout.");
+      ClearSavedBook();
    }
 
    const bool realign = g_realign;
@@ -1313,6 +1932,11 @@ void RunGrid()
       stats.deleted += DeleteUnexpectedPending();
    if(realign && !interrupted && g_requestsLeft > 0)
       g_realign = false;
+   if(g_restoring && !interrupted && g_requestsLeft > 0)
+   {
+      g_restoring = false;
+      Print("DynamicGridBB finished restoring the grid.");
+   }
 
    ShowStatus("");
    if(stats.placed + stats.modified + stats.deleted > 0)
@@ -1328,7 +1952,8 @@ void Maintain(const bool force)
       return;
 
    const datetime now = TimeCurrent();
-   if(!force && g_lastMaintain > 0 && (now - g_lastMaintain) < InpMaintainSeconds)
+   const int spacing = g_restoring ? 1 : InpMaintainSeconds;
+   if(!force && g_lastMaintain > 0 && (now - g_lastMaintain) < spacing)
       return;
 
    g_busy = true;
@@ -1350,20 +1975,6 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    if(InpTakeProfitPercent <= 0.0 || InpTakeProfitPercent >= 100.0)
       return INIT_PARAMETERS_INCORRECT;
-   if(InpReduceOnlyGap < 0.0 || InpFlattenGap < 0.0)
-      return INIT_PARAMETERS_INCORRECT;
-   if(InpReduceOnlyGap > 0.0 && InpFlattenGap > 0.0 && InpFlattenGap <= InpReduceOnlyGap)
-   {
-      Print("DynamicGridBB: the flatten gap must be above the reduce-only gap.");
-      return INIT_PARAMETERS_INCORRECT;
-   }
-   if(InpNewsMinutesBefore < 0 || InpNewsMinutesAfter < 0)
-      return INIT_PARAMETERS_INCORRECT;
-   if(InpNewsBlackout && InpNewsMinutesBefore + InpNewsMinutesAfter < 1)
-   {
-      Print("DynamicGridBB: the news window must cover at least one minute.");
-      return INIT_PARAMETERS_INCORRECT;
-   }
    if(InpMagic <= 0 || InpMaintainSeconds < 1)
       return INIT_PARAMETERS_INCORRECT;
 
@@ -1381,9 +1992,10 @@ int OnInit()
    if(marginMode != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
       Print("DynamicGridBB: this grid keeps buys and sells open together. Use a hedging account.");
 
-   if(!EventSetTimer(InpMaintainSeconds))
+   if(!EventSetTimer(1))
       Print("DynamicGridBB: timer was not created. The grid will update on ticks. Error ", GetLastError());
 
+   LoadSessionBookFile();
    OpenEquityLog();
    return INIT_SUCCEEDED;
 }
@@ -1620,6 +2232,6 @@ void OnTimer()
 
 void OnTrade()
 {
-   Maintain(true);
+   Maintain(!g_restoring);
 }
 //+------------------------------------------------------------------+
