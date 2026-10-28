@@ -3,7 +3,7 @@
 //|                                         Dynamic Bollinger grid   |
 //+------------------------------------------------------------------+
 #property copyright "Grid"
-#property version   "1.13"
+#property version   "1.16"
 #property description "Writes balance, equity, and floating profit on a chosen timeframe."
 #property description "Dynamic grid on 4H EMA Bollinger Bands (length 21, 3 standard deviations)."
 #property description "Limit orders only. Buy levels above the ask are skipped. Sell levels below the bid are skipped."
@@ -54,6 +54,7 @@ input bool InpDeletePendingOnRemove  = false;  // Delete pending orders when the
 
 #define OBJ_PREFIX            "BBG."
 #define MAX_REQUESTS_PER_PASS 10
+#define GRID_ORDERS_PER_SECOND 2
 #define BLACKOUT_SECONDS      300
 
 CTrade   g_trade;
@@ -95,6 +96,8 @@ bool     g_sessionSpecOk = true;
 string   g_sessionStatus;
 bool     g_holdRestore = false;
 bool     g_restoring = false;
+bool     g_pacingGrid = false;
+bool     g_slotLimited = false;
 bool     g_bookCaptured = false;
 int      g_savedCount = 0;
 int      g_savedCursor = 0;
@@ -288,6 +291,23 @@ bool ConsumeRequest()
       return false;
    g_requestsLeft--;
    return true;
+}
+
+int ServerSlotLimit()
+{
+   const long reported = AccountInfoInteger(ACCOUNT_LIMIT_ORDERS);
+   if(reported > 0)
+      return (int)reported;
+   return 180;
+}
+
+bool AccountSlotFree()
+{
+   const int used = OrdersTotal() + PositionsTotal();
+   if(used < ServerSlotLimit())
+      return true;
+   g_slotLimited = true;
+   return false;
 }
 
 bool TradingAllowed()
@@ -592,6 +612,9 @@ bool PlacePending(const ENUM_ORDER_TYPE type, const double lots, const double pr
       return false;
    }
 
+   if(!AccountSlotFree())
+      return false;
+
    if(!ConsumeRequest())
       return false;
 
@@ -610,6 +633,12 @@ bool PlacePending(const ENUM_ORDER_TYPE type, const double lots, const double pr
       {
          g_filling = modes[i];
          return true;
+      }
+
+      if(g_trade.ResultRetcode() == TRADE_RETCODE_LIMIT_ORDERS)
+      {
+         g_slotLimited = true;
+         return false;
       }
 
       if(g_trade.ResultRetcode() != TRADE_RETCODE_INVALID_FILL)
@@ -1618,6 +1647,9 @@ bool OpenRestored(const bool isBuy, const double lots, const double sl, const do
       return false;
    }
 
+   if(!AccountSlotFree())
+      return false;
+
    if(!ConsumeRequest())
       return false;
 
@@ -1636,6 +1668,12 @@ bool OpenRestored(const bool isBuy, const double lots, const double sl, const do
       {
          g_filling = modes[i];
          return true;
+      }
+
+      if(g_trade.ResultRetcode() == TRADE_RETCODE_LIMIT_ORDERS)
+      {
+         g_slotLimited = true;
+         return false;
       }
 
       if(g_trade.ResultRetcode() != TRADE_RETCODE_INVALID_FILL)
@@ -1798,7 +1836,13 @@ void ShowStatus(const string note)
       text += StringFormat("\nRestoring position %d of %d from before the session blackout.",
                            g_savedCursor + 1, g_savedCount);
    else if(g_restoring)
-      text += "\nRestoring the grid, one order per second.";
+      text += "\nRestoring the grid, two orders per second.";
+   else if(g_pacingGrid)
+      text += "\nBuilding the grid, two orders per second.";
+   if(g_slotLimited)
+      text += StringFormat("\nServer limit %d orders and positions (%d used). Waiting for a free slot.",
+                           ServerSlotLimit(),
+                           OrdersTotal() + PositionsTotal());
    if(InpEquityLog && g_equityFile != "")
       text += "\nEquity record: " + g_equityFile;
    if(note != "")
@@ -1813,6 +1857,7 @@ void RunGrid()
 {
    ConfigureTrade();
    g_requestsLeft = MAX_REQUESTS_PER_PASS;
+   g_slotLimited = false;
 
    if(!EnsureState())
    {
@@ -1893,14 +1938,13 @@ void RunGrid()
       else
       {
          ClearSavedBook();
-         Print("DynamicGridBB is restoring the grid, one order per second.");
+         Print("DynamicGridBB is restoring the grid, two orders per second.");
       }
    }
-   if(g_restoring)
-      g_requestsLeft = 1;
 
    if(g_savedCount > 0 && g_savedCursor < g_savedCount)
    {
+      g_requestsLeft = 1;
       RestoreSavedPositions();
       if(g_savedCursor < g_savedCount)
       {
@@ -1910,6 +1954,8 @@ void RunGrid()
       Print("DynamicGridBB restored the positions from before the session blackout.");
       ClearSavedBook();
    }
+
+   g_requestsLeft = GRID_ORDERS_PER_SECOND;
 
    const bool realign = g_realign;
    SyncStats stats;
@@ -1932,6 +1978,7 @@ void RunGrid()
       stats.deleted += DeleteUnexpectedPending();
    if(realign && !interrupted && g_requestsLeft > 0)
       g_realign = false;
+   g_pacingGrid = interrupted || g_requestsLeft <= 0;
    if(g_restoring && !interrupted && g_requestsLeft > 0)
    {
       g_restoring = false;
@@ -1952,7 +1999,7 @@ void Maintain(const bool force)
       return;
 
    const datetime now = TimeCurrent();
-   const int spacing = g_restoring ? 1 : InpMaintainSeconds;
+   const int spacing = (g_pacingGrid || g_restoring) ? 1 : InpMaintainSeconds;
    if(!force && g_lastMaintain > 0 && (now - g_lastMaintain) < spacing)
       return;
 
@@ -2232,6 +2279,6 @@ void OnTimer()
 
 void OnTrade()
 {
-   Maintain(!g_restoring);
+   Maintain(!(g_restoring || g_pacingGrid));
 }
 //+------------------------------------------------------------------+
