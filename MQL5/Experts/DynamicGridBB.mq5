@@ -3,7 +3,8 @@
 //|                                         Dynamic Bollinger grid   |
 //+------------------------------------------------------------------+
 #property copyright "Grid"
-#property version   "1.16"
+#property version   "1.17"
+#property description "Tilts buy and sell size with the 4H EMA 21 slope. Both sides use the base divisor when the slope is flat."
 #property description "Writes balance, equity, and floating profit on a chosen timeframe."
 #property description "Dynamic grid on 4H EMA Bollinger Bands (length 21, 3 standard deviations)."
 #property description "Limit orders only. Buy levels above the ask are skipped. Sell levels below the bid are skipped."
@@ -21,8 +22,8 @@ enum ENUM_NEWS_CURRENCIES
 
 input group "Budget"
 input double InpEquityReserve     = 180000.0; // Equity reserve (margin = equity - reserve)
-input double InpBuyMarginDivisor  = 40.0;     // Buy margin divisor
-input double InpSellMarginDivisor = 80.0;     // Sell margin divisor
+input double InpBaseMarginDivisor = 40.0;     // Base margin divisor, buys and sells
+input double InpTrendTilt         = 0.0;      // Trend tilt, 0 keeps both sides equal
 
 input group "Bollinger bands"
 input ENUM_TIMEFRAMES InpTimeframe = PERIOD_H4; // Band timeframe
@@ -56,9 +57,16 @@ input bool InpDeletePendingOnRemove  = false;  // Delete pending orders when the
 #define MAX_REQUESTS_PER_PASS 10
 #define GRID_ORDERS_PER_SECOND 2
 #define BLACKOUT_SECONDS      300
+#define TILT_PERIOD           21
+#define TILT_DEVIATION        3.0
 
 CTrade   g_trade;
 int      g_maHandle = INVALID_HANDLE;
+int      g_tiltMaHandle = INVALID_HANDLE;
+datetime g_tiltBarTime = 0;
+double   g_trendSlope = 0.0;
+double   g_buyFraction = 0.0;
+double   g_sellFraction = 0.0;
 ENUM_ORDER_TYPE_FILLING g_filling = ORDER_FILLING_RETURN;
 
 bool     g_busy = false;
@@ -406,6 +414,111 @@ bool EnsureState()
                DoubleToString(g_lower, _Digits),
                DoubleToString(g_middle, _Digits),
                DoubleToString(g_upper, _Digits));
+   return true;
+}
+
+void ResetLotCache()
+{
+   ArrayResize(g_buyLots, InpGridLevels);
+   ArrayResize(g_sellLots, InpGridLevels);
+   ArrayInitialize(g_buyLots, -1.0);
+   ArrayInitialize(g_sellLots, -1.0);
+}
+
+double SideFraction(const bool isBuy)
+{
+   return isBuy ? g_buyFraction : g_sellFraction;
+}
+
+double EffectiveDivisor(const bool isBuy)
+{
+   const double fraction = SideFraction(isBuy);
+   if(fraction <= 0.0)
+      return 0.0;
+   return 1.0 / fraction;
+}
+
+// The neutral order uses margin / base divisor. A positive slope gives that
+// weight to buys, a negative slope gives it to sells, and the two weights
+// are rescaled so their sum stays equal to two neutral orders.
+void ApplyTrendTilt(const double slope)
+{
+   g_trendSlope = slope;
+   double buyFactor = 1.0 + InpTrendTilt * slope;
+   double sellFactor = 1.0 - InpTrendTilt * slope;
+   if(buyFactor < 0.0)
+      buyFactor = 0.0;
+   if(sellFactor < 0.0)
+      sellFactor = 0.0;
+
+   const double sum = buyFactor + sellFactor;
+   if(sum <= 0.0)
+   {
+      buyFactor = 1.0;
+      sellFactor = 1.0;
+   }
+   else
+   {
+      buyFactor = buyFactor * 2.0 / sum;
+      sellFactor = sellFactor * 2.0 / sum;
+   }
+
+   g_buyFraction = buyFactor / InpBaseMarginDivisor;
+   g_sellFraction = sellFactor / InpBaseMarginDivisor;
+}
+
+bool RefreshTrendRatio()
+{
+   const datetime barOpen = iTime(_Symbol, PERIOD_H4, 0);
+   if(barOpen <= 0)
+      return false;
+   if(g_tiltBarTime == barOpen && g_buyFraction > 0.0)
+      return true;
+   if(BarsCalculated(g_tiltMaHandle) < TILT_PERIOD + 22)
+      return false;
+   if(Bars(_Symbol, PERIOD_H4) < TILT_PERIOD + 22)
+      return false;
+
+   double ema[];
+   ArraySetAsSeries(ema, true);
+   if(CopyBuffer(g_tiltMaHandle, 0, 1, TILT_PERIOD + 1, ema) != TILT_PERIOD + 1)
+      return false;
+
+   double closes[];
+   ArraySetAsSeries(closes, true);
+   if(CopyClose(_Symbol, PERIOD_H4, 1, TILT_PERIOD, closes) != TILT_PERIOD)
+      return false;
+
+   double sum = 0.0;
+   for(int i = 0; i < TILT_PERIOD; ++i)
+   {
+      const double delta = closes[i] - ema[0];
+      sum += delta * delta;
+   }
+
+   const double deviation = MathSqrt(sum / TILT_PERIOD);
+   const double band = TILT_DEVIATION * deviation;
+   double slope = 0.0;
+   if(band > 0.0)
+      slope = (ema[0] - ema[TILT_PERIOD]) / band;
+   if(slope > 1.0)
+      slope = 1.0;
+   if(slope < -1.0)
+      slope = -1.0;
+
+   const bool resizeOrders = (g_tiltBarTime != 0 && g_tiltBarTime != barOpen);
+   ApplyTrendTilt(slope);
+   g_tiltBarTime = barOpen;
+   if(resizeOrders)
+   {
+      g_realign = true;
+      ResetLotCache();
+   }
+
+   PrintFormat("DynamicGridBB ratio. 4H slope %s. Buy divisor %s, sell divisor %s.",
+               DoubleToString(g_trendSlope, 2),
+               DoubleToString(EffectiveDivisor(true), 2),
+               DoubleToString(EffectiveDivisor(false), 2));
    return true;
 }
 
@@ -873,7 +986,13 @@ void SyncLevel(const bool isBuy, const int index, const bool realign, SyncStats 
    if(ticket != 0 && !realign)
       return;
 
-   const double money = g_margin / (isBuy ? InpBuyMarginDivisor : InpSellMarginDivisor);
+   const double money = g_margin * SideFraction(isBuy);
+   if(money <= 0.0)
+   {
+      if(ticket != 0 && !IsPriceFrozen(currentPrice) && DeletePending(ticket))
+         stats.deleted++;
+      return;
+   }
    double lots = 0.0;
    if(!LotsForLevel(isBuy, index, type, price, money, lots))
       return;
@@ -1798,15 +1917,15 @@ void EnforceSessionBlackout()
 void ShowStatus(const string note)
 {
    const int digits = MoneyDigits();
-   const double buyMoney = (InpBuyMarginDivisor > 0.0) ? g_margin / InpBuyMarginDivisor : 0.0;
-   const double sellMoney = (InpSellMarginDivisor > 0.0) ? g_margin / InpSellMarginDivisor : 0.0;
+   const double buyMoney = g_margin * g_buyFraction;
+   const double sellMoney = g_margin * g_sellFraction;
    const datetime closedBar = iTime(_Symbol, InpTimeframe, 1);
 
    const double gridMargin = InpGridLevels * (buyMoney + sellMoney);
    const string buyMode = SideBlocked(true) ? "reduce-only" : "trading";
    const string sellMode = SideBlocked(false) ? "reduce-only" : "trading";
    const double equityNow = AccountInfoDouble(ACCOUNT_EQUITY);
-   string text = StringFormat("Dynamic BB grid  %s\nEquity now %s | Reserve %s\nGrid margin %s = snapshot equity %s - reserve\nBuy/order %s | Sell/order %s | Full grid %s | Free %s\nOpen loss %s | Buys %s | Sells %s\nReduce-only gap %s = (equity - reserve) / 2 | Buy %s | Sell %s\nLower %s | EMA %s | Upper %s\nPending %d | Positions %d | Bands from %s",
+   string text = StringFormat("Dynamic BB grid  %s\nEquity now %s | Reserve %s\nGrid margin %s = snapshot equity %s - reserve\nBuy/order %s | Sell/order %s | Full grid %s | Free %s\n4H slope %s | Buy divisor %s | Sell divisor %s\nOpen loss %s | Buys %s | Sells %s\nReduce-only gap %s = (equity - reserve) / 2 | Buy %s | Sell %s\nLower %s | EMA %s | Upper %s\nPending %d | Positions %d | Bands from %s",
                               _Symbol,
                               DoubleToString(equityNow, digits),
                               DoubleToString(InpEquityReserve, digits),
@@ -1816,6 +1935,9 @@ void ShowStatus(const string note)
                               DoubleToString(sellMoney, digits),
                               DoubleToString(gridMargin, digits),
                               DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_FREE), digits),
+                              DoubleToString(g_trendSlope, 2),
+                              DoubleToString(EffectiveDivisor(true), 2),
+                              DoubleToString(EffectiveDivisor(false), 2),
                               DoubleToString(g_openLoss, digits),
                               DoubleToString(g_buyFloating, digits),
                               DoubleToString(g_sellFloating, digits),
@@ -1865,6 +1987,7 @@ void RunGrid()
       return;
    }
 
+   RefreshTrendRatio();
    DrawGrid();
    RefreshNewsCache();
    RefreshSessionState();
@@ -2014,7 +2137,7 @@ void Maintain(const bool force)
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   if(InpEquityReserve < 0.0 || InpBuyMarginDivisor <= 0.0 || InpSellMarginDivisor <= 0.0)
+   if(InpEquityReserve < 0.0 || InpBaseMarginDivisor <= 0.0 || InpTrendTilt < 0.0)
       return INIT_PARAMETERS_INCORRECT;
    if(InpBandsPeriod < 2 || InpBandsDeviation <= 0.0)
       return INIT_PARAMETERS_INCORRECT;
@@ -2025,10 +2148,18 @@ int OnInit()
    if(InpMagic <= 0 || InpMaintainSeconds < 1)
       return INIT_PARAMETERS_INCORRECT;
 
+   ApplyTrendTilt(0.0);
    g_maHandle = iMA(_Symbol, InpTimeframe, InpBandsPeriod, 0, MODE_EMA, PRICE_CLOSE);
    if(g_maHandle == INVALID_HANDLE)
    {
       Print("DynamicGridBB: failed to create the EMA. Error ", GetLastError());
+      return INIT_FAILED;
+   }
+
+   g_tiltMaHandle = iMA(_Symbol, PERIOD_H4, TILT_PERIOD, 0, MODE_EMA, PRICE_CLOSE);
+   if(g_tiltMaHandle == INVALID_HANDLE)
+   {
+      Print("DynamicGridBB: failed to create the 4H EMA. Error ", GetLastError());
       return INIT_FAILED;
    }
 
@@ -2065,6 +2196,11 @@ void OnDeinit(const int reason)
    {
       IndicatorRelease(g_maHandle);
       g_maHandle = INVALID_HANDLE;
+   }
+   if(g_tiltMaHandle != INVALID_HANDLE)
+   {
+      IndicatorRelease(g_tiltMaHandle);
+      g_tiltMaHandle = INVALID_HANDLE;
    }
 }
 
