@@ -3,7 +3,9 @@
 //|                                         Dynamic Bollinger grid   |
 //+------------------------------------------------------------------+
 #property copyright "Grid"
-#property version   "1.16"
+#property version   "1.21"
+#property description "Keeps the full grid, and sends only the nearest pending orders on each side."
+#property description "Optional weekend mode trades Saturday and Sunday, then reduce-only on weekdays."
 #property description "Writes balance, equity, and floating profit on a chosen timeframe."
 #property description "Dynamic grid on 4H EMA Bollinger Bands (length 21, 3 standard deviations)."
 #property description "Limit orders only. Buy levels above the ask are skipped. Sell levels below the bid are skipped."
@@ -20,7 +22,7 @@ enum ENUM_NEWS_CURRENCIES
 };
 
 input group "Budget"
-input double InpEquityReserve     = 180000.0; // Equity reserve (margin = equity - reserve)
+input double InpMarginCap = 10000.0; // Maximum grid margin
 input double InpBuyMarginDivisor  = 40.0;     // Buy margin divisor
 input double InpSellMarginDivisor = 80.0;     // Sell margin divisor
 
@@ -31,6 +33,7 @@ input double          InpBandsDeviation = 3.0;  // Standard deviations
 
 input group "Grid"
 input int    InpGridLevels        = 20;   // Orders on each side
+input int    InpOpenOrdersPerSide = 5;    // Pending orders on each side, closest first (0 = all)
 input double InpTakeProfitPercent = 0.1;  // Take profit, percent of entry
 
 input group "News blackout"
@@ -40,6 +43,7 @@ input bool                 InpNewsWholeAccount = true;            // Clear every
 
 input group "Session blackout"
 input bool InpSessionBlackout = true; // Flatten outside the symbol trade sessions
+input bool InpWeekendMode     = false; // Trade Saturday and Sunday, then reduce-only
 
 input group "Equity record"
 input bool            InpEquityLog       = true;      // Save the equity curve to a file
@@ -52,6 +56,7 @@ input int  InpMaintainSeconds        = 2;      // How often to check the grid, s
 input bool InpDrawGrid               = true;   // Draw bands and order levels
 input bool InpDeletePendingOnRemove  = false;  // Delete pending orders when the EA is removed
 
+#define EQUITY_RESERVE        180000.0
 #define OBJ_PREFIX            "BBG."
 #define MAX_REQUESTS_PER_PASS 10
 #define GRID_ORDERS_PER_SECOND 2
@@ -94,6 +99,7 @@ string   g_nextNewsCurrency;
 bool     g_inSessionBlackout = false;
 bool     g_sessionSpecOk = true;
 string   g_sessionStatus;
+bool     g_weekendReduce = false;
 bool     g_holdRestore = false;
 bool     g_restoring = false;
 bool     g_pacingGrid = false;
@@ -388,7 +394,9 @@ bool EnsureState()
 
    const double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    g_equityAtRefresh = equity;
-   g_margin = equity - InpEquityReserve;
+   g_margin = equity - EQUITY_RESERVE;
+   if(g_margin > InpMarginCap)
+      g_margin = InpMarginCap;
    g_barTime = barOpen;
    g_ready = true;
    g_realign = true;
@@ -399,10 +407,11 @@ bool EnsureState()
    ArrayInitialize(g_buyLots, -1.0);
    ArrayInitialize(g_sellLots, -1.0);
 
-   PrintFormat("DynamicGridBB refresh. Equity %s, reserve %s, margin %s. Lower %s, middle %s, upper %s.",
+   PrintFormat("DynamicGridBB refresh. Equity %s, reserve %s, margin %s, cap %s. Lower %s, middle %s, upper %s.",
                DoubleToString(equity, MoneyDigits()),
-               DoubleToString(InpEquityReserve, MoneyDigits()),
+               DoubleToString(EQUITY_RESERVE, MoneyDigits()),
                DoubleToString(g_margin, MoneyDigits()),
+               DoubleToString(InpMarginCap, MoneyDigits()),
                DoubleToString(g_lower, _Digits),
                DoubleToString(g_middle, _Digits),
                DoubleToString(g_upper, _Digits));
@@ -731,11 +740,26 @@ int DeleteUnexpectedPending()
 //+------------------------------------------------------------------+
 double ReduceOnlyGap()
 {
-   return (AccountInfoDouble(ACCOUNT_EQUITY) - InpEquityReserve) / 2.0;
+   double budget = AccountInfoDouble(ACCOUNT_EQUITY) - EQUITY_RESERVE;
+   if(budget > InpMarginCap)
+      budget = InpMarginCap;
+   return budget / 2.0;
+}
+
+bool WeekendReduceOnly()
+{
+   if(!InpWeekendMode)
+      return false;
+
+   MqlDateTime now;
+   TimeToStruct(TimeCurrent(), now);
+   return (now.day_of_week != SATURDAY && now.day_of_week != SUNDAY);
 }
 
 bool SideBlocked(const bool isBuy)
 {
+   if(WeekendReduceOnly())
+      return true;
    return isBuy ? g_reduceBuy : g_reduceSell;
 }
 
@@ -797,6 +821,119 @@ void UpdateRiskMode()
       Print("DynamicGridBB buys can place orders again.");
    if(!g_reduceSell && wasReduceSell)
       Print("DynamicGridBB sells can place orders again.");
+}
+
+double LevelDistance(const bool isBuy, const double price)
+{
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick) || tick.ask <= 0.0 || tick.bid <= 0.0)
+      return DBL_MAX;
+   if(isBuy)
+      return tick.ask - price;
+   return price - tick.bid;
+}
+
+void SortLevelsByDistance(int &index[], double &distance[], const int count)
+{
+   for(int i = 1; i < count; ++i)
+   {
+      const int savedIndex = index[i];
+      const double savedDistance = distance[i];
+      int j = i - 1;
+      while(j >= 0 && distance[j] > savedDistance)
+      {
+         index[j + 1] = index[j];
+         distance[j + 1] = distance[j];
+         --j;
+      }
+      index[j + 1] = savedIndex;
+      distance[j + 1] = savedDistance;
+   }
+}
+
+bool OrderCapActive()
+{
+   return (InpOpenOrdersPerSide > 0 && InpOpenOrdersPerSide < InpGridLevels);
+}
+
+void RetireLevel(const bool isBuy, const int index, SyncStats &stats)
+{
+   const ulong ticket = FindPending(LevelComment(isBuy, index));
+   if(ticket == 0)
+      return;
+   const double price = OrderGetDouble(ORDER_PRICE_OPEN);
+   if(IsPriceFrozen(price))
+      return;
+   if(DeletePending(ticket))
+      stats.deleted++;
+}
+
+void SyncSide(const bool isBuy, const bool realign, SyncStats &stats, bool &interrupted)
+{
+   if(!OrderCapActive() || SideBlocked(isBuy) || !DirectionAllowed(isBuy))
+   {
+      for(int i = 0; i < InpGridLevels; ++i)
+      {
+         if(TimeCurrent() < g_pauseTradingUntil)
+         {
+            interrupted = true;
+            return;
+         }
+         SyncLevel(isBuy, i, realign, stats);
+      }
+      return;
+   }
+
+   int ranked[];
+   double distance[];
+   int cleanup[];
+   ArrayResize(ranked, InpGridLevels);
+   ArrayResize(distance, InpGridLevels);
+   ArrayResize(cleanup, InpGridLevels);
+   int rankedCount = 0;
+   int cleanupCount = 0;
+
+   for(int i = 0; i < InpGridLevels; ++i)
+   {
+      const double price = LevelPrice(isBuy, i);
+      const bool beyond = PriceBeyondMarket(isBuy, price);
+      const bool occupied = LevelOccupied(isBuy, i, price);
+      if(beyond || occupied)
+      {
+         if(FindPending(LevelComment(isBuy, i)) != 0)
+            cleanup[cleanupCount++] = i;
+         continue;
+      }
+
+      ranked[rankedCount] = i;
+      distance[rankedCount] = LevelDistance(isBuy, price);
+      rankedCount++;
+   }
+
+   SortLevelsByDistance(ranked, distance, rankedCount);
+   const int keep = MathMin(rankedCount, InpOpenOrdersPerSide);
+   for(int i = 0; i < rankedCount; ++i)
+   {
+      if(TimeCurrent() < g_pauseTradingUntil)
+      {
+         interrupted = true;
+         return;
+      }
+      if(i < keep)
+         SyncLevel(isBuy, ranked[i], realign, stats);
+      else
+         RetireLevel(isBuy, ranked[i], stats);
+   }
+
+   for(int i = 0; i < cleanupCount; ++i)
+   {
+      if(TimeCurrent() < g_pauseTradingUntil)
+      {
+         interrupted = true;
+         return;
+      }
+      SyncLevel(isBuy, cleanup[i], realign, stats);
+   }
 }
 
 void SyncLevel(const bool isBuy, const int index, const bool realign, SyncStats &stats)
@@ -1308,7 +1445,7 @@ bool NextSessionOpen(int &dayOffset, int &openAt)
    for(int add = 0; add < 8; ++add)
    {
       const int day = (now.day_of_week + add) % 7;
-      if(day == SUNDAY || day == SATURDAY)
+      if((day == SUNDAY || day == SATURDAY) && !InpWeekendMode)
          continue;
 
       int earliest = -1;
@@ -1369,10 +1506,11 @@ void RefreshSessionState()
    TimeToStruct(TimeCurrent(), now);
    const int secondOfDay = now.hour * 3600 + now.min * 60 + now.sec;
    const bool weekend = (now.day_of_week == SUNDAY || now.day_of_week == SATURDAY);
+   const bool forceWeekendFlat = weekend && !InpWeekendMode;
 
    int closesAt = 0;
-   const bool trading = (!weekend && g_sessionSpecOk && InTradableWindow((ENUM_DAY_OF_WEEK)now.day_of_week, secondOfDay, closesAt));
-   const bool blackout = weekend || (g_sessionSpecOk && !trading);
+   const bool trading = (!forceWeekendFlat && g_sessionSpecOk && InTradableWindow((ENUM_DAY_OF_WEEK)now.day_of_week, secondOfDay, closesAt));
+   const bool blackout = forceWeekendFlat || (g_sessionSpecOk && !trading);
 
    if(blackout && !g_inSessionBlackout)
       Print("DynamicGridBB session blackout. Orders and positions will be cleared. " + NextSessionText());
@@ -1382,12 +1520,12 @@ void RefreshSessionState()
 
    if(!g_sessionSpecOk)
    {
-      g_sessionStatus = weekend
+      g_sessionStatus = forceWeekendFlat
                         ? "No trade sessions in the specification. Weekend flat. " + NextSessionText()
-                        : "No trade sessions in the specification. Weekday hours are not being used.";
+                        : "No trade sessions in the specification. Session hours are not being used.";
       return;
    }
-   if(weekend)
+   if(forceWeekendFlat)
    {
       g_sessionStatus = "Weekend flat. " + NextSessionText();
       return;
@@ -1398,6 +1536,16 @@ void RefreshSessionState()
       return;
    }
    g_sessionStatus = "Session flat. " + NextSessionText();
+}
+
+void RefreshWeekendMode()
+{
+   const bool reduce = WeekendReduceOnly();
+   if(reduce && !g_weekendReduce)
+      Print("DynamicGridBB weekend mode: reduce-only until Saturday. Open positions stay.");
+   if(!reduce && g_weekendReduce)
+      Print("DynamicGridBB weekend mode: the weekend session can place orders again.");
+   g_weekendReduce = reduce;
 }
 
 string CommentForSaved(const bool isBuy, const string comment, const double openPrice)
@@ -1806,12 +1954,13 @@ void ShowStatus(const string note)
    const string buyMode = SideBlocked(true) ? "reduce-only" : "trading";
    const string sellMode = SideBlocked(false) ? "reduce-only" : "trading";
    const double equityNow = AccountInfoDouble(ACCOUNT_EQUITY);
-   string text = StringFormat("Dynamic BB grid  %s\nEquity now %s | Reserve %s\nGrid margin %s = snapshot equity %s - reserve\nBuy/order %s | Sell/order %s | Full grid %s | Free %s\nOpen loss %s | Buys %s | Sells %s\nReduce-only gap %s = (equity - reserve) / 2 | Buy %s | Sell %s\nLower %s | EMA %s | Upper %s\nPending %d | Positions %d | Bands from %s",
+   string text = StringFormat("Dynamic BB grid  %s\nEquity now %s | Reserve %s\nGrid margin %s = min(snapshot equity %s - reserve, cap %s)\nBuy/order %s | Sell/order %s | Full grid %s | Free %s\nOpen loss %s | Buys %s | Sells %s\nReduce-only gap %s = capped margin / 2 | Buy %s | Sell %s\nLower %s | EMA %s | Upper %s\nPending %d | Positions %d | Bands from %s",
                               _Symbol,
                               DoubleToString(equityNow, digits),
-                              DoubleToString(InpEquityReserve, digits),
+                              DoubleToString(EQUITY_RESERVE, digits),
                               DoubleToString(g_margin, digits),
                               DoubleToString(g_equityAtRefresh, digits),
+                              DoubleToString(InpMarginCap, digits),
                               DoubleToString(buyMoney, digits),
                               DoubleToString(sellMoney, digits),
                               DoubleToString(gridMargin, digits),
@@ -1828,8 +1977,15 @@ void ShowStatus(const string note)
                               CountOur(false),
                               CountOur(true),
                               closedBar > 0 ? TimeToString(closedBar, TIME_DATE | TIME_MINUTES) : "-");
+   if(OrderCapActive())
+      text += StringFormat("\nPending cap %d per side. Further levels wait until a nearer order fills.",
+                           InpOpenOrdersPerSide);
    text += "\n" + NewsStatus();
    text += "\n" + g_sessionStatus;
+   if(InpWeekendMode)
+      text += g_weekendReduce
+              ? "\nWeekend mode: reduce-only until Saturday"
+              : "\nWeekend mode: trading through Sunday";
    if(g_inSessionBlackout && g_savedCount > 0)
       text += StringFormat("\n%d position(s) saved for the session reopen.", g_savedCount);
    if(g_restoring && g_savedCount > 0 && g_savedCursor < g_savedCount)
@@ -1868,6 +2024,7 @@ void RunGrid()
    DrawGrid();
    RefreshNewsCache();
    RefreshSessionState();
+   RefreshWeekendMode();
 
    if(g_inNews || g_inSessionBlackout)
    {
@@ -1964,16 +2121,9 @@ void RunGrid()
    stats.deleted = 0;
 
    bool interrupted = false;
-   for(int i = 0; i < InpGridLevels; ++i)
-   {
-      if(TimeCurrent() < g_pauseTradingUntil)
-      {
-         interrupted = true;
-         break;
-      }
-      SyncLevel(true, i, realign, stats);
-      SyncLevel(false, i, realign, stats);
-   }
+   SyncSide(true, realign, stats, interrupted);
+   if(!interrupted)
+      SyncSide(false, realign, stats, interrupted);
    if(!interrupted)
       stats.deleted += DeleteUnexpectedPending();
    if(realign && !interrupted && g_requestsLeft > 0)
@@ -2014,11 +2164,13 @@ void Maintain(const bool force)
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   if(InpEquityReserve < 0.0 || InpBuyMarginDivisor <= 0.0 || InpSellMarginDivisor <= 0.0)
+   if(InpMarginCap <= 0.0 || InpBuyMarginDivisor <= 0.0 || InpSellMarginDivisor <= 0.0)
       return INIT_PARAMETERS_INCORRECT;
    if(InpBandsPeriod < 2 || InpBandsDeviation <= 0.0)
       return INIT_PARAMETERS_INCORRECT;
    if(InpGridLevels < 2 || InpGridLevels > 100)
+      return INIT_PARAMETERS_INCORRECT;
+   if(InpOpenOrdersPerSide < 0)
       return INIT_PARAMETERS_INCORRECT;
    if(InpTakeProfitPercent <= 0.0 || InpTakeProfitPercent >= 100.0)
       return INIT_PARAMETERS_INCORRECT;

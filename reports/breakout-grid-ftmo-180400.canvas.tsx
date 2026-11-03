@@ -16,426 +16,25 @@ import {
 
 type BookDay = { date: string; pnl: number; dd: number; legs: number[] };
 
-const EQUITY_CLOSE = [181037.0, 182432.0, 182432.0, 182432.0, 182649.0, 182254.0, 183055.0, 184406.0, 183911.0, 183911.0, 183911.0, 183909.0, 184277.0, 186323.0, 187477.0, 188250.0, 188250.0, 188250.0, 190445.0, 192080.0, 194592.0, 195784.0, 194439.0, 194439.0, 194439.0, 196913.0, 196915.0, 201032.0, 202167.0, 202106.0, 202106.0];
+const SAVED_CLOSE = [180558, 180633, 180633, 180633, 181080, 180978, 181175, 181732, 181646, 181646, 181646, 181529, 181457, 181983, 182773, 183609, 183609, 183609, 183491, 185273, 187059, 189063, 190353, 190353, 190353, 192069, 191416, 191252, 193330, 198327, 198327];
 
-const EQUITY_LOW = [180281.0, 181008.0, 182432.0, 182432.0, 182317.0, 182186.0, 182254.0, 182894.0, 183457.0, 183643.0, 183643.0, 183500.0, 183571.0, 183275.0, 185220.0, 184988.0, 187164.0, 187164.0, 187035.0, 188367.0, 190607.0, 191897.0, 191954.0, 193101.0, 193101.0, 192188.0, 193869.0, 194250.0, 198523.0, 194370.0, 200052.0];
+const SAVED_LOW = [180389, 180520, 180633, 180633, 180624, 180918, 180941, 181175, 181583, 181646, 181646, 181378, 181450, 181249, 181875, 182005, 183399, 183399, 182961, 183089, 184810, 185127, 187892, 190002, 190002, 188203, 190244, 189258, 189989, 190690, 197337];
 
-const DAILY_LOSS = [119.0, 30.0, 0.0, 0.0, 115.0, 463.0, 0.0, 160.0, 950.0, 268.0, 268.0, 411.0, 338.0, 1001.0, 1103.0, 2489.0, 1086.0, 1086.0, 1215.0, 2078.0, 1473.0, 2696.0, 3830.0, 1338.0, 1338.0, 2251.0, 3044.0, 2666.0, 2510.0, 7797.0, 2055.0];
+const SAVED_LOSS = [11, 38, 0, 0, 10, 162, 38, 0, 149, 0, 0, 268, 78, 209, 108, 768, 210, 210, 648, 402, 463, 1932, 1171, 351, 351, 2150, 1825, 2157, 1263, 2639, 990];
 
-const LEG_NAMES = [
-  "EURUSD breakout",
-  "XAUUSD breakout",
-  "US500 breakout",
-  "US100 breakout",
-  "EURUSD grid",
-  "US500 grid"
-];
+const SAVED_NAMES = ["EURUSD breakout", "US100 breakout", "US500 breakout", "XAUUSD breakout", "EURUSD grid"];
 
-const BOOK_DAYS: BookDay[] = [
-  {
-    "date": "2026.10.01",
-    "pnl": 616.13,
-    "dd": 119.43,
-    "legs": [
-      84.58,
-      -74.62,
-      395.76,
-      162.61,
-      0.0,
-      47.8
-    ]
-  },
-  {
-    "date": "2026.10.02",
-    "pnl": 1444.28,
-    "dd": 29.57,
-    "legs": [
-      7.43,
-      463.78,
-      761.18,
-      -15.98,
-      69.6,
-      158.27
-    ]
-  },
-  {
-    "date": "2026.10.03",
-    "pnl": 0.0,
-    "dd": 0.0,
-    "legs": [
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0
-    ]
-  },
-  {
-    "date": "2026.10.04",
-    "pnl": 0.0,
-    "dd": 0.0,
-    "legs": [
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0
-    ]
-  },
-  {
-    "date": "2026.10.05",
-    "pnl": 475.76,
-    "dd": 114.98,
-    "legs": [
-      346.47,
-      66.26,
-      53.04,
-      -11.08,
-      21.07,
-      0.0
-    ]
-  },
-  {
-    "date": "2026.10.06",
-    "pnl": 82.46,
-    "dd": 462.52,
-    "legs": [
-      42.44,
-      46.18,
-      -38.76,
-      -30.0,
-      62.6,
-      0.0
-    ]
-  },
-  {
-    "date": "2026.10.07",
-    "pnl": 427.87,
-    "dd": 0.0,
-    "legs": [
-      -28.24,
-      314.49,
-      -58.14,
-      4.67,
-      120.64,
-      74.45
-    ]
-  },
-  {
-    "date": "2026.10.08",
-    "pnl": 1095.64,
-    "dd": 160.49,
-    "legs": [
-      -15.0,
-      42.1,
-      -48.45,
-      330.91,
-      786.08,
-      0.0
-    ]
-  },
-  {
-    "date": "2026.10.09",
-    "pnl": -49.93,
-    "dd": 949.69,
-    "legs": [
-      -56.48,
-      -42.64,
-      -48.45,
-      -22.5,
-      120.14,
-      0.0
-    ]
-  },
-  {
-    "date": "2026.10.10",
-    "pnl": 0.0,
-    "dd": 267.61,
-    "legs": [
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0
-    ]
-  },
-  {
-    "date": "2026.10.11",
-    "pnl": 0.0,
-    "dd": 267.61,
-    "legs": [
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0
-    ]
-  },
-  {
-    "date": "2026.10.12",
-    "pnl": 303.89,
-    "dd": 411.04,
-    "legs": [
-      12.4,
-      -16.9,
-      36.98,
-      149.56,
-      121.85,
-      0.0
-    ]
-  },
-  {
-    "date": "2026.10.13",
-    "pnl": 118.79,
-    "dd": 337.95,
-    "legs": [
-      -42.36,
-      -53.3,
-      16.07,
-      47.85,
-      150.53,
-      0.0
-    ]
-  },
-  {
-    "date": "2026.10.14",
-    "pnl": 1328.16,
-    "dd": 1001.39,
-    "legs": [
-      425.74,
-      419.05,
-      -48.45,
-      16.97,
-      186.04,
-      328.81
-    ]
-  },
-  {
-    "date": "2026.10.15",
-    "pnl": 1008.72,
-    "dd": 1102.97,
-    "legs": [
-      0.0,
-      96.56,
-      -48.45,
-      102.9,
-      397.61,
-      460.1
-    ]
-  },
-  {
-    "date": "2026.10.16",
-    "pnl": 1615.14,
-    "dd": 2488.73,
-    "legs": [
-      180.89,
-      35.0,
-      175.44,
-      267.76,
-      437.26,
-      518.79
-    ]
-  },
-  {
-    "date": "2026.10.17",
-    "pnl": 0.0,
-    "dd": 1086.3,
-    "legs": [
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0
-    ]
-  },
-  {
-    "date": "2026.10.18",
-    "pnl": 0.0,
-    "dd": 1086.3,
-    "legs": [
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0
-    ]
-  },
-  {
-    "date": "2026.10.19",
-    "pnl": 1271.6,
-    "dd": 1214.96,
-    "legs": [
-      210.81,
-      47.56,
-      -96.9,
-      -50.25,
-      508.23,
-      652.15
-    ]
-  },
-  {
-    "date": "2026.10.20",
-    "pnl": 1419.02,
-    "dd": 2078.17,
-    "legs": [
-      105.34,
-      -31.98,
-      -38.76,
-      -22.5,
-      1069.94,
-      336.98
-    ]
-  },
-  {
-    "date": "2026.10.21",
-    "pnl": 2627.42,
-    "dd": 1472.9,
-    "legs": [
-      -56.48,
-      -53.3,
-      480.74,
-      299.78,
-      1578.28,
-      378.4
-    ]
-  },
-  {
-    "date": "2026.10.22",
-    "pnl": 2123.26,
-    "dd": 2695.55,
-    "legs": [
-      126.94,
-      156.64,
-      -48.45,
-      26.4,
-      1418.68,
-      443.05
-    ]
-  },
-  {
-    "date": "2026.10.23",
-    "pnl": 405.95,
-    "dd": 3830.25,
-    "legs": [
-      0.0,
-      -42.56,
-      -48.45,
-      -15.0,
-      202.59,
-      309.37
-    ]
-  },
-  {
-    "date": "2026.10.24",
-    "pnl": 0.0,
-    "dd": 1337.69,
-    "legs": [
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0
-    ]
-  },
-  {
-    "date": "2026.10.25",
-    "pnl": 0.0,
-    "dd": 1337.69,
-    "legs": [
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0
-    ]
-  },
-  {
-    "date": "2026.10.26",
-    "pnl": 1216.3,
-    "dd": 2250.92,
-    "legs": [
-      -76.44,
-      49.66,
-      -96.9,
-      155.63,
-      900.45,
-      283.9
-    ]
-  },
-  {
-    "date": "2026.10.27",
-    "pnl": 1351.17,
-    "dd": 3044.04,
-    "legs": [
-      25.29,
-      -42.56,
-      -48.45,
-      75.46,
-      267.11,
-      1074.32
-    ]
-  },
-  {
-    "date": "2026.10.28",
-    "pnl": 2688.39,
-    "dd": 2665.54,
-    "legs": [
-      -16.81,
-      -42.56,
-      -48.45,
-      -15.0,
-      1985.34,
-      825.87
-    ]
-  },
-  {
-    "date": "2026.10.29",
-    "pnl": 3888.42,
-    "dd": 2509.57,
-    "legs": [
-      -56.48,
-      -42.56,
-      -38.76,
-      353.79,
-      2369.13,
-      1303.3
-    ]
-  },
-  {
-    "date": "2026.10.30",
-    "pnl": -5806.86,
-    "dd": 7797.37,
-    "legs": [
-      -17.47,
-      138.6,
-      154.28,
-      122.03,
-      -1581.33,
-      -4622.97
-    ]
-  },
-  {
-    "date": "2026.10.31",
-    "pnl": 0.0,
-    "dd": 2054.68,
-    "legs": [
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0
-    ]
-  }
-];
+const SAVED_DAYS: BookDay[] = [{"date": "2026.10.01", "pnl": 168.88, "dd": 11.22, "legs": [29.45, 38.01, 86.96, 14.46, 0.0]}, {"date": "2026.10.02", "pnl": 72.93, "dd": 38.4, "legs": [0.0, 6.04, -53.55, 90.61, 29.83]}, {"date": "2026.10.03", "pnl": 0.0, "dd": 0.0, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}, {"date": "2026.10.04", "pnl": 0.0, "dd": 0.0, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}, {"date": "2026.10.05", "pnl": 452.07, "dd": 9.71, "legs": [125.29, 29.24, 109.47, 177.49, 10.58]}, {"date": "2026.10.06", "pnl": 15.19, "dd": 162.33, "legs": [69.8, -68.03, -37.31, 21.95, 28.78]}, {"date": "2026.10.07", "pnl": 87.08, "dd": 37.5, "legs": [37.68, 7.74, 22.81, -41.2, 60.05]}, {"date": "2026.10.08", "pnl": 597.75, "dd": 0.0, "legs": [19.4, 150.78, 32.64, 89.74, 305.19]}, {"date": "2026.10.09", "pnl": -130.25, "dd": 149.38, "legs": [7.47, -40.01, -111.95, 0.0, 14.24]}, {"date": "2026.10.10", "pnl": 0.0, "dd": 0.0, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}, {"date": "2026.10.11", "pnl": 0.0, "dd": 0.0, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}, {"date": "2026.10.12", "pnl": 35.53, "dd": 267.83, "legs": [-63.4, 95.07, -9.89, -38.8, 52.55]}, {"date": "2026.10.13", "pnl": -207.5, "dd": 78.45, "legs": [-105.24, -17.11, -149.14, 84.02, -20.03]}, {"date": "2026.10.14", "pnl": 632.72, "dd": 208.69, "legs": [350.56, 120.33, -23.18, 49.57, 135.44]}, {"date": "2026.10.15", "pnl": 740.8, "dd": 108.07, "legs": [0.0, 130.1, 332.64, 97.04, 181.02]}, {"date": "2026.10.16", "pnl": 771.98, "dd": 767.73, "legs": [14.67, 363.83, 170.69, 243.03, -20.24]}, {"date": "2026.10.17", "pnl": 0.0, "dd": 209.61, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}, {"date": "2026.10.18", "pnl": 0.0, "dd": 209.61, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}, {"date": "2026.10.19", "pnl": -138.19, "dd": 648.15, "legs": [72.12, -410.95, 572.89, -251.55, -120.7]}, {"date": "2026.10.20", "pnl": 1619.95, "dd": 402.14, "legs": [166.91, 216.07, 782.71, 144.6, 309.66]}, {"date": "2026.10.21", "pnl": 1609.68, "dd": 463.01, "legs": [-110.49, 200.79, 1097.35, -206.93, 628.96]}, {"date": "2026.10.22", "pnl": 2014.14, "dd": 1931.84, "legs": [284.59, 235.47, 244.72, 579.04, 670.32]}, {"date": "2026.10.23", "pnl": 1335.01, "dd": 1171.04, "legs": [0.0, 605.27, -469.09, 1163.75, 35.08]}, {"date": "2026.10.24", "pnl": 0.0, "dd": 350.93, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}, {"date": "2026.10.25", "pnl": 0.0, "dd": 350.93, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}, {"date": "2026.10.26", "pnl": 1890.14, "dd": 2149.8, "legs": [-480.89, 612.94, 665.49, 650.73, 441.87]}, {"date": "2026.10.27", "pnl": -380.57, "dd": 1825.37, "legs": [69.12, 211.83, -198.53, -339.42, -123.57]}, {"date": "2026.10.28", "pnl": -672.97, "dd": 2157.41, "legs": [-194.72, -299.14, -157.32, -226.66, 204.87]}, {"date": "2026.10.29", "pnl": 3381.43, "dd": 1263.23, "legs": [-363.12, 1495.36, 533.18, 470.55, 1245.46]}, {"date": "2026.10.30", "pnl": 3041.27, "dd": 2639.42, "legs": [0.0, 1478.2, 1211.7, 724.59, -373.22]}, {"date": "2026.10.31", "pnl": 0.0, "dd": 990.27, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}];
+
+const FITTED_CLOSE = [180558, 180633, 180633, 180633, 181080, 180978, 181175, 181732, 181646, 181646, 181646, 181529, 181457, 181983, 182773, 183609, 183609, 183609, 183491, 185273, 187059, 189063, 190353, 190353, 190353, 192069, 191416, 191252, 193330, 198327, 198327];
+
+const FITTED_LOW = [180389, 180520, 180633, 180633, 180624, 180918, 180941, 181175, 181583, 181646, 181646, 181378, 181450, 181249, 181875, 182005, 183399, 183399, 182961, 183089, 184810, 185127, 187892, 190002, 190002, 188203, 190244, 189258, 189989, 190690, 197337];
+
+const FITTED_LOSS = [11, 38, 0, 0, 10, 162, 38, 0, 149, 0, 0, 268, 78, 209, 108, 768, 210, 210, 648, 402, 463, 1932, 1171, 351, 351, 2150, 1825, 2157, 1263, 2639, 990];
+
+const FITTED_NAMES = ["EURUSD breakout", "US100 breakout", "US500 breakout", "XAUUSD breakout", "EURUSD grid"];
+
+const FITTED_DAYS: BookDay[] = [{"date": "2026.10.01", "pnl": 168.88, "dd": 11.22, "legs": [29.45, 38.01, 86.96, 14.46, 0.0]}, {"date": "2026.10.02", "pnl": 72.93, "dd": 38.4, "legs": [0.0, 6.04, -53.55, 90.61, 29.83]}, {"date": "2026.10.03", "pnl": 0.0, "dd": 0.0, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}, {"date": "2026.10.04", "pnl": 0.0, "dd": 0.0, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}, {"date": "2026.10.05", "pnl": 452.07, "dd": 9.71, "legs": [125.29, 29.24, 109.47, 177.49, 10.58]}, {"date": "2026.10.06", "pnl": 15.19, "dd": 162.33, "legs": [69.8, -68.03, -37.31, 21.95, 28.78]}, {"date": "2026.10.07", "pnl": 87.08, "dd": 37.5, "legs": [37.68, 7.74, 22.81, -41.2, 60.05]}, {"date": "2026.10.08", "pnl": 597.75, "dd": 0.0, "legs": [19.4, 150.78, 32.64, 89.74, 305.19]}, {"date": "2026.10.09", "pnl": -130.25, "dd": 149.38, "legs": [7.47, -40.01, -111.95, 0.0, 14.24]}, {"date": "2026.10.10", "pnl": 0.0, "dd": 0.0, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}, {"date": "2026.10.11", "pnl": 0.0, "dd": 0.0, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}, {"date": "2026.10.12", "pnl": 35.53, "dd": 267.83, "legs": [-63.4, 95.07, -9.89, -38.8, 52.55]}, {"date": "2026.10.13", "pnl": -207.5, "dd": 78.45, "legs": [-105.24, -17.11, -149.14, 84.02, -20.03]}, {"date": "2026.10.14", "pnl": 632.72, "dd": 208.69, "legs": [350.56, 120.33, -23.18, 49.57, 135.44]}, {"date": "2026.10.15", "pnl": 740.8, "dd": 108.07, "legs": [0.0, 130.1, 332.64, 97.04, 181.02]}, {"date": "2026.10.16", "pnl": 771.98, "dd": 767.73, "legs": [14.67, 363.83, 170.69, 243.03, -20.24]}, {"date": "2026.10.17", "pnl": 0.0, "dd": 209.61, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}, {"date": "2026.10.18", "pnl": 0.0, "dd": 209.61, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}, {"date": "2026.10.19", "pnl": -138.19, "dd": 648.15, "legs": [72.12, -410.95, 572.89, -251.55, -120.7]}, {"date": "2026.10.20", "pnl": 1619.95, "dd": 402.14, "legs": [166.91, 216.07, 782.71, 144.6, 309.66]}, {"date": "2026.10.21", "pnl": 1609.68, "dd": 463.01, "legs": [-110.49, 200.79, 1097.35, -206.93, 628.96]}, {"date": "2026.10.22", "pnl": 2014.14, "dd": 1931.84, "legs": [284.59, 235.47, 244.72, 579.04, 670.32]}, {"date": "2026.10.23", "pnl": 1335.01, "dd": 1171.04, "legs": [0.0, 605.27, -469.09, 1163.75, 35.08]}, {"date": "2026.10.24", "pnl": 0.0, "dd": 350.93, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}, {"date": "2026.10.25", "pnl": 0.0, "dd": 350.93, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}, {"date": "2026.10.26", "pnl": 1890.14, "dd": 2149.8, "legs": [-480.89, 612.94, 665.49, 650.73, 441.87]}, {"date": "2026.10.27", "pnl": -380.57, "dd": 1825.37, "legs": [69.12, 211.83, -198.53, -339.42, -123.57]}, {"date": "2026.10.28", "pnl": -672.97, "dd": 2157.41, "legs": [-194.72, -299.14, -157.32, -226.66, 204.87]}, {"date": "2026.10.29", "pnl": 3381.43, "dd": 1263.23, "legs": [-363.12, 1495.36, 533.18, 470.55, 1245.46]}, {"date": "2026.10.30", "pnl": 3041.27, "dd": 2639.42, "legs": [0.0, 1478.2, 1211.7, 724.59, -373.22]}, {"date": "2026.10.31", "pnl": 0.0, "dd": 990.27, "legs": [0.0, 0.0, 0.0, 0.0, 0.0]}];
 
 const DAYS = [
   "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
@@ -560,11 +159,11 @@ function weekLabel(dates: string[]): string {
   return `${firstLabel} – ${lastLabel}`;
 }
 
-function WeekCell({ week }: { week: string[] }) {
+function WeekCell({ week, days }: { week: string[]; days: BookDay[] }) {
   const theme = useHostTheme();
   const dates = week.filter((date) => date !== "");
   if (dates.length === 0) return <div />;
-  const byDate = new Map(BOOK_DAYS.map((day) => [day.date, day]));
+  const byDate = new Map(days.map((day) => [day.date, day]));
   let pnl = 0;
   let up = 0;
   let down = 0;
@@ -603,19 +202,19 @@ function WeekCell({ week }: { week: string[] }) {
   );
 }
 
-function BookCalendar() {
+function BookCalendar({ days, heading, caption }: { days: BookDay[]; heading: string; caption: string }) {
   const theme = useHostTheme();
-  const byDate = new Map(BOOK_DAYS.map((day) => [day.date, day]));
-  const green = BOOK_DAYS.filter((day) => rounded(day.pnl) > 0).length;
-  const red = BOOK_DAYS.filter((day) => rounded(day.pnl) < 0).length;
+  const byDate = new Map(days.map((day) => [day.date, day]));
+  const green = days.filter((day) => rounded(day.pnl) > 0).length;
+  const red = days.filter((day) => rounded(day.pnl) < 0).length;
   return (
     <Stack gap={8}>
       <Stack gap={2}>
-        <H2>October P&L calendar</H2>
+        <H2>{heading}</H2>
         <Text size="small" tone="secondary">
-          {usd(BOOK_DAYS.reduce((sum, day) => sum + day.pnl, 0))} closed · {green} green days · {red} red days.
+          {usd(days.reduce((sum, day) => sum + day.pnl, 0))} closed · {green} green days · {red} red days.
           The three numbers are legs that closed up, down, or flat. DD is that day's drop from midnight equity.
-          The Week column is Monday–Sunday closed P&L.
+          The Week column is Monday–Sunday closed P&L. {caption}
         </Text>
       </Stack>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr)) minmax(108px, 132px)", gap: 6 }}>
@@ -630,7 +229,7 @@ function BookCalendar() {
             const day = date ? byDate.get(date) : undefined;
             return (
               <DayCell
-                key={`${weekIndex}-${dayIndex}`}
+                key={`${heading}-${weekIndex}-${dayIndex}`}
                 date={date}
                 pnl={day?.pnl}
                 mix={day ? mixOf(day.legs) : undefined}
@@ -639,18 +238,18 @@ function BookCalendar() {
               />
             );
           }),
-          <WeekCell key={`week-${weekIndex}`} week={week} />,
+          <WeekCell key={`${heading}-week-${weekIndex}`} week={week} days={days} />,
         ])}
       </div>
     </Stack>
   );
 }
 
-function LegCalendar({ index }: { index: number }) {
+function LegCalendar({ index, days, names }: { index: number; days: BookDay[]; names: string[] }) {
   const theme = useHostTheme();
-  const name = LEG_NAMES[index];
-  const byDate = new Map(BOOK_DAYS.map((day) => [day.date, day.legs[index]]));
-  const values = BOOK_DAYS.map((day) => day.legs[index]);
+  const name = names[index];
+  const byDate = new Map(days.map((day) => [day.date, day.legs[index]]));
+  const values = days.map((day) => day.legs[index]);
   const net = values.reduce((sum, value) => sum + value, 0);
   const green = values.filter((value) => rounded(value) > 0).length;
   const red = values.filter((value) => rounded(value) < 0).length;
@@ -683,32 +282,49 @@ export default function BreakoutGridFtmo180400() {
     <Stack gap={24}>
       <Stack gap={8}>
         <H1>October book for the $180,400 FTMO account</H1>
-        <Text tone="secondary">
-          Run four of the 0.5k breakout sets as saved, plus the EURUSD and
-          US500 grids at their prepared divisors. From 1 Oct to 1 Nov 2026
-          that mix made $19,652. The worst day gave back $7,797. Equity's low
-          was $180,281, $281 above the $180,000 floor. The order book stayed
-          under the 200 cap.
-        </Text>
+        <Text tone="secondary">Real ticks, 1–31 October 2026, deposit $180,400. The EURUSD grid flattens outside the symbol session. Breakout sizing caps at $190,000 of equity, and grid margin caps at $10,000. Saved inputs already respect the $9,000 day, so the finetuned result is the same book: $16,937 of profit, a $2,639 day, with equity down to $180,389.</Text>
       </Stack>
-
+      <Stack gap={8}>
+        <H2>Each strategy on its own</H2>
+        <Text>
+          These are the MT5 results, one expert at a time, every tick based on real ticks.
+          The combined figures below let every expert read the shared equity, so a gain in one leg increases the lots of the others.
+          Grid tests flatten outside the symbol session.
+        </Text>
+        <Table
+          headers={["Strategy", "Own October", "Trades", "Minimum margin level", "Test"]}
+          columnAlign={["left", "right", "right", "right", "left"]}
+          rows={[
+            ["EURUSD breakout", "$232", "59", "44,590%", "Saved inputs."],
+            ["US100 breakout", "$584", "125", "48,041%", "Saved inputs."],
+            ["US500 breakout", "$594", "81", "15,301%", "Saved inputs."],
+            ["XAUUSD breakout", "$589", "52", "15,928%", "Saved inputs."],
+            ["EURUSD grid", "$589", "744", "21,914%", "Session flatten on."],
+            ["XAUUSD grid", "$0", "0", "n/a", "0 trades. The minimum gold volume does not clear."],
+          ]}
+          striped
+        />
+      </Stack>
+      <Divider />
+      <Stack gap={8}>
+        <H2>Saved inputs</H2>
+        <Text>The cushion at the open is $400, under the $190,000 breakout sizing cap and the $10,000 grid cap. Breakout lots are the saved input times 0.35 times that cushion divided by $6,000, so they open far below the input and grow after the account has made money. The EURUSD grid uses the prepared divisors. The gold grid placed no trades, so that leg stays out of the book.</Text>
+      </Stack>
       <Grid columns={4} gap={16}>
-        <Stat value="$19,652" label="Net profit, October" tone="success" />
-        <Stat value="$7,797" label="Worst day, 30 Oct" tone="warning" />
-        <Stat value="$180,281" label="Lowest equity, 1 Oct" tone="warning" />
-        <Stat value="$154,750" label="Free margin, lower bound" />
+        <Stat value="$16,937" label="Net profit, October" tone="success" />
+        <Stat value="$2,639" label="Worst day, 30 Oct" tone="warning" />
+        <Stat value="$180,389" label="Lowest equity" tone="warning" />
+        <Stat value="$140,465" label="Free margin, lower bound" tone="info" />
       </Grid>
-
-      <BookCalendar />
-
+      <BookCalendar days={SAVED_DAYS} heading="October P&L, saved inputs" caption="This calendar is also the finetuned book. The worst day stays under $9,000." />
       <Grid columns={2} gap={20}>
         <Stack gap={8}>
-          <H3>Account equity through October</H3>
+          <H3>Equity, saved inputs</H3>
           <LineChart
             categories={DAYS}
             series={[
-              { name: "Equity at day close", data: EQUITY_CLOSE, tone: "success" },
-              { name: "Lowest equity that day", data: EQUITY_LOW, tone: "warning" },
+              { name: "Equity at day close", data: SAVED_CLOSE, tone: "success" },
+              { name: "Lowest equity that day", data: SAVED_LOW, tone: "warning" },
             ]}
             beginAtZero={false}
             yMin={178000}
@@ -717,107 +333,65 @@ export default function BreakoutGridFtmo180400() {
             height={260}
             referenceLines={[{ value: 180000, label: "$180k floor", tone: "danger" }]}
           />
-          <Text tone="tertiary" size="small">
-            Day of October 2026 on the horizontal axis. Equity in USD. The danger
-            line is the $180,000 maximum-loss floor. The month's low, $180,281,
-            is on 1 Oct. Source: MT5 tests on FTMO symbols, 1-minute OHLC, 1:100,
-            deposit $180,400.
-          </Text>
+          <Text tone="tertiary" size="small">Day of October 2026. Equity in USD. The danger line is the $180,000 floor. The month's low, $180,389, is $389 above that line. Source: real-tick MT5 tests, deposit $180,400, EURUSD grid with session flatten.</Text>
         </Stack>
         <Stack gap={8}>
-          <H3>Daily equity loss against the $9,000 limit</H3>
+          <H3>Daily equity loss, saved inputs</H3>
           <BarChart
             categories={DAYS}
-            series={[{ name: "Loss from midnight equity", data: DAILY_LOSS, tone: "warning" }]}
+            series={[{ name: "Loss from midnight equity", data: SAVED_LOSS, tone: "warning" }]}
             valuePrefix="$"
             height={260}
             referenceLines={[{ value: 9000, label: "$9,000 limit", tone: "danger" }]}
           />
           <Text tone="tertiary" size="small">
-            Day of October 2026. Loss is midnight equity minus the lowest equity
-            that server day, in USD. 30 Oct used $7,797 of the $9,000 daily limit.
+            Day of October 2026. Loss is midnight equity minus the lowest equity that server day, in USD.
           </Text>
         </Stack>
       </Grid>
-
       <Stack gap={8}>
         <H2>What to run</H2>
-        <Text>
-          Breakouts keep the saved 0.5k lots. Both grids keep the prepared
-          divisors, the $180,000 reserve, the band settings, and the level
-          count. At the open the cushion is $400, so those grids start small
-          and grow only as the breakouts add equity. Gold and bitcoin grids
-          cannot place their minimum volume on that open, so they stay off.
-        </Text>
+        <Text>Session flatten is on for the EURUSD grid. The gold grid stays out.</Text>
         <Table
-          headers={["Leg", "Prepared set", "Run it as", "Profit in the mix"]}
+          headers={["Leg", "Set", "Run it as", "Profit in the mix"]}
           columnAlign={["left", "left", "left", "right"]}
           rows={[
-            ["EURUSD breakout", "05k / eurusd_84p_350p_0p09", "Saved. 0.83 lots, 30-bar channel, $10 stop, 4 entries", "$1,203"],
-            ["XAUUSD breakout", "05k / XAU_83p_120p_0p11", "Saved. 0.12 lots, 10-bar channel, $10 stop, 4 entries", "$1,433"],
-            ["US500 breakout", "05k / US500_80p_220p_0p32", "Saved. 25.5 lots, 10-bar channel, $10 stop, 5 entries", "$1,318"],
-            ["US100 breakout", "05k / US100_83p_300p_0p16", "Saved. 1.5 lots, 10-bar channel, $10 stop, 5 entries", "$1,934"],
-            ["EURUSD grid", "EURUSD_99p_220p_1p7", "Prepared divisors, buy 40 and sell 20. Reserve stays $180,000", "$11,192"],
-            ["US500 grid", "US500_99p_150p_1p5", "Prepared divisors, buy 20 and sell 25. Reserve stays $180,000", "$2,573"],
+            ["EURUSD breakout", "sets/EUR_2500", "Saved input 9. Opens near 0.21 lots. M15, 100 bars, both ways, reset 14:00.", "\u2212$71"],
+            ["US100 breakout", "sets/US100_4200", "Saved input 12.3. Opens near 0.29 lots. M15, 20 bars, both ways, reset 17:00.", "$5,162"],
+            ["US500 breakout", "sets/US500_3000", "Saved input 150. Opens near 3.5 lots. M10, 10 bars, both ways, reset 17:00.", "$4,653"],
+            ["XAUUSD breakout", "sets/XAU_3000", "Saved input 2.7. Opens near 0.06 lots. M5, 20 bars, short only, reset 16:00.", "$3,497"],
+            ["EURUSD grid", "EURUSD_99p_220p_1p7", "Prepared divisors, buy 40 and sell 20. Session flatten on. Margin cap $10,000.", "$3,696"],
           ]}
           striped
         />
-        <Text tone="secondary">
-          The four breakouts alone made $5,887, with a worst day of $177 on
-          28 Oct. The two grids add $13,765. Together the peak of orders plus
-          positions is at most 108, under the 200 cap.
-        </Text>
+        <Text tone="secondary">Order cap is at most 70.</Text>
       </Stack>
-
       <H2>Each leg</H2>
       <Grid columns={2} gap={28}>
-        {LEG_NAMES.map((name, index) => (
-          <LegCalendar key={name} index={index} />
+        {SAVED_NAMES.map((name, index) => (
+          <LegCalendar key={`${name}-saved`} index={index} days={SAVED_DAYS} names={SAVED_NAMES} />
         ))}
       </Grid>
-
-      <Divider />
-
+      <Callout tone="info" title="Saved inputs already fit the $9,000 day">The worst day is 30 Oct, closed +$3,041, with $2,639 given back from midnight. Free margin stayed above $140,465.</Callout>
+<Divider />
       <Stack gap={8}>
-        <H2>Left off</H2>
+        <H2>Inputs sized for the $9,000 day</H2>
         <Text>
-          The gold, bitcoin, and bitcoin-weekend grids never opened a trade on
-          the $180,400 test. The other two made money on their own and still
-          break a limit once they share the account.
+          The saved inputs already keep the worst day at $2,639, equity at $180,389, and free margin above $140,465.
+          The search leaves every executable leg at full weight, so the finetuned book is this same book.
+          The gold grid stays out. Its own test is 0 trades.
         </Text>
-        <Table
-          headers={["Set", "Alone in October", "Why it stays off"]}
-          columnAlign={["left", "right", "left"]}
-          rows={[
-            ["GBPUSD breakout, 05k set, 1 lot", "$670", "Adding it puts 30 Oct at $8,796, $204 under the $9,000 cap. Left off so the worst day stays at $7,797."],
-            ["XAUUSD grid", "$0", "0 trades. A $400 cushion cannot place the minimum gold volume."],
-            ["BTCUSD grid", "$0", "0 trades. A $400 cushion cannot place the minimum bitcoin volume."],
-            ["BTCUSD weekend grid", "$0", "0 trades. The tester reports each level needs $80 of margin, which this cushion does not have."],
-            ["ETHUSD weekend grid", "$297", "140 trades, so the minimum volume does clear. Adding it makes 30 Oct a $15,688 day and pushes free margin through $50,000."],
-          ]}
-          striped
-        />
       </Stack>
-
-      <Callout tone="warning" title="The floor binds on the first day">
-        On 1 Oct equity reached $180,281, which is $281 above $180,000, before
-        the month's profits had built a cushion. 30 Oct is the daily-limit day:
-        it closed −$5,807 and equity gave back $7,797 from midnight. There is
-        $1,203 of room under the $9,000 limit. GBPUSD's extra $670 would spend
-        that room down to $204, so it stays off.
+      <Grid columns={4} gap={16}>
+        <Stat value="$16,937" label="Net profit, October" tone="success" />
+        <Stat value="$2,639" label="Worst day, 30 Oct" tone="warning" />
+        <Stat value="$180,389" label="Lowest equity" tone="warning" />
+        <Stat value="$140,465" label="Free margin, lower bound" tone="info" />
+      </Grid>
+      <Callout tone="warning" title="The binding constraint is the $180,000 floor">
+        Equity reached $180,389, $389 above $180,000. 30 Oct closed +$3,041 and gave back $2,639 from midnight, leaving $6,361 under the $9,000 limit. The book grows into the $190,000 sizing cap. A $400 cushion cannot place the minimum gold volume.
       </Callout>
-
-      <Text tone="tertiary" size="small">
-        Tests are single-strategy MT5 runs from 1 Oct 2026 to 1 Nov 2026, model
-        1-minute OHLC, FTMO-Server symbols, leverage 1:100, deposit $180,400.
-        Grid lots follow equity minus the $180,000 reserve, trade by trade, so
-        a grid that cannot meet the minimum volume at the open is left off even
-        if a larger account would trade it. Daily loss is midnight server equity
-        versus the lowest equity in the next 24 hours, with each strategy's worst
-        tick inside a 5-minute bucket allowed to land together. Free margin is a
-        lower bound from each test's minimum margin level. This is not a single
-        test with all six experts on one chart.
-      </Text>
+      <Text tone="tertiary" size="small">Tests are single-strategy MT5 runs, every tick based on real ticks, 100% real ticks, FTMO symbols, leverage 1:100, from 1 Oct 2026 to 1 Nov 2026. Grid profiles set session flatten on and a $10,000 margin cap; the set files in the repo stay unchanged. Breakout sizing uses equity capped at $190,000. Grid margin is equity minus $180,000, stopped at $10,000. Daily loss allows each strategy's worst tick inside a 5-minute bucket to land together. Free margin is a lower bound from each test's minimum margin level. The sized book is the highest October profit, in steps of one tenth, with daily loss at or under $9,000, equity at or above $180,000, free margin at or above $50,000, and at most 200 orders. Deposit $180,400.</Text>
     </Stack>
   );
 }
