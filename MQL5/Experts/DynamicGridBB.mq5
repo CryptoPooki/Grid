@@ -3,7 +3,8 @@
 //|                                         Dynamic Bollinger grid   |
 //+------------------------------------------------------------------+
 #property copyright "Grid"
-#property version   "1.21"
+#property version   "1.23"
+#property description "Flattens the account for the rest of the server day after a 9000 daily equity drop."
 #property description "Keeps the full grid, and sends only the nearest pending orders on each side."
 #property description "Optional weekend mode trades Saturday and Sunday, then reduce-only on weekdays."
 #property description "Writes balance, equity, and floating profit on a chosen timeframe."
@@ -22,7 +23,7 @@ enum ENUM_NEWS_CURRENCIES
 };
 
 input group "Budget"
-input double InpMarginCap = 10000.0; // Maximum grid margin
+input double InpMarginCap = 12000.0; // Maximum grid margin
 input double InpBuyMarginDivisor  = 40.0;     // Buy margin divisor
 input double InpSellMarginDivisor = 80.0;     // Sell margin divisor
 
@@ -44,6 +45,9 @@ input bool                 InpNewsWholeAccount = true;            // Clear every
 input group "Session blackout"
 input bool InpSessionBlackout = true; // Flatten outside the symbol trade sessions
 input bool InpWeekendMode     = false; // Trade Saturday and Sunday, then reduce-only
+
+input group "Emergency brake"
+input double InpDailyDrawdown = 9000.0; // Flatten the account when today's equity drop reaches this (0 = off)
 
 input group "Equity record"
 input bool            InpEquityLog       = true;      // Save the equity curve to a file
@@ -100,6 +104,10 @@ bool     g_inSessionBlackout = false;
 bool     g_sessionSpecOk = true;
 string   g_sessionStatus;
 bool     g_weekendReduce = false;
+bool     g_emergency = false;
+int      g_emergencyDay = 0;
+double   g_dayEquity = 0.0;
+double   g_dailyDrawdown = 0.0;
 bool     g_holdRestore = false;
 bool     g_restoring = false;
 bool     g_pacingGrid = false;
@@ -1327,6 +1335,105 @@ void EnforceNewsBlackout()
    }
 }
 
+int DayStamp()
+{
+   MqlDateTime now;
+   TimeToStruct(TimeCurrent(), now);
+   return now.year * 10000 + now.mon * 100 + now.day;
+}
+
+void RefreshEmergency()
+{
+   if(InpDailyDrawdown <= 0.0)
+   {
+      g_emergency = false;
+      g_dailyDrawdown = 0.0;
+      return;
+   }
+
+   const int day = DayStamp();
+   if(g_emergencyDay != day)
+   {
+      g_emergency = false;
+      g_emergencyDay = day;
+   }
+
+   const string equityKey = StringFormat("DGBB.DayEquity.%d", day);
+   const string latchKey = StringFormat("DGBB.Emergency.%d", day);
+   if(!GlobalVariableCheck(equityKey))
+      GlobalVariableSet(equityKey, AccountInfoDouble(ACCOUNT_EQUITY));
+   g_dayEquity = GlobalVariableGet(equityKey);
+
+   const double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   g_dailyDrawdown = g_dayEquity - equity;
+   if(g_dailyDrawdown < 0.0)
+      g_dailyDrawdown = 0.0;
+
+   const bool wasEmergency = g_emergency;
+   if(GlobalVariableCheck(latchKey) && GlobalVariableGet(latchKey) > 0.5)
+      g_emergency = true;
+   if(g_dailyDrawdown >= InpDailyDrawdown)
+   {
+      g_emergency = true;
+      GlobalVariableSet(latchKey, 1.0);
+   }
+   if(g_emergency && !wasEmergency)
+   {
+      PrintFormat("DynamicGridBB emergency brake. Daily drawdown %s from day equity %s. The account stays flat until the next server day.",
+                  DoubleToString(g_dailyDrawdown, MoneyDigits()),
+                  DoubleToString(g_dayEquity, MoneyDigits()));
+   }
+}
+
+int DeleteEmergencyOrders()
+{
+   int deleted = 0;
+   for(int i = OrdersTotal() - 1; i >= 0; --i)
+   {
+      const ulong ticket = OrderGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(!ConsumeRequest())
+         break;
+      if(g_trade.OrderDelete(ticket))
+         deleted++;
+      else
+         LogError(StringFormat("Could not delete order %I64u for the emergency brake: %s",
+                               ticket, g_trade.ResultRetcodeDescription()));
+   }
+   return deleted;
+}
+
+int CloseEmergencyPositions()
+{
+   int closed = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; --i)
+   {
+      const ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(!ConsumeRequest())
+         break;
+      if(g_trade.PositionClose(ticket, (ulong)InpSlippagePoints))
+         closed++;
+      else
+         LogError(StringFormat("Could not close position %I64u for the emergency brake: %s",
+                               ticket, g_trade.ResultRetcodeDescription()));
+   }
+   return closed;
+}
+
+void EnforceEmergency()
+{
+   const int deleted = DeleteEmergencyOrders();
+   const int closed = CloseEmergencyPositions();
+   if(deleted + closed > 0)
+   {
+      PrintFormat("DynamicGridBB emergency brake cleared %d order(s) and %d position(s).",
+                  deleted, closed);
+   }
+}
+
 string NewsStatus()
 {
    if(!InpNewsBlackout)
@@ -1986,6 +2093,12 @@ void ShowStatus(const string note)
       text += g_weekendReduce
               ? "\nWeekend mode: reduce-only until Saturday"
               : "\nWeekend mode: trading through Sunday";
+   if(InpDailyDrawdown > 0.0)
+      text += StringFormat("\nDaily drawdown %s / %s",
+                           DoubleToString(g_dailyDrawdown, digits),
+                           DoubleToString(InpDailyDrawdown, digits));
+   if(g_emergency)
+      text += "\nEMERGENCY FLAT until the next server day";
    if(g_inSessionBlackout && g_savedCount > 0)
       text += StringFormat("\n%d position(s) saved for the session reopen.", g_savedCount);
    if(g_restoring && g_savedCount > 0 && g_savedCursor < g_savedCount)
@@ -2014,6 +2127,24 @@ void RunGrid()
    ConfigureTrade();
    g_requestsLeft = MAX_REQUESTS_PER_PASS;
    g_slotLimited = false;
+   RefreshEmergency();
+
+   if(g_emergency)
+   {
+      g_holdRestore = false;
+      g_restoring = false;
+      if(!TradingAllowed())
+      {
+         ShowStatus("Emergency brake, but AutoTrading is off. Orders and positions were not cleared.");
+         return;
+      }
+
+      g_requestsLeft = 100;
+      EnforceEmergency();
+      RefreshOpenLoss();
+      ShowStatus("");
+      return;
+   }
 
    if(!EnsureState())
    {
@@ -2165,6 +2296,8 @@ void Maintain(const bool force)
 int OnInit()
 {
    if(InpMarginCap <= 0.0 || InpBuyMarginDivisor <= 0.0 || InpSellMarginDivisor <= 0.0)
+      return INIT_PARAMETERS_INCORRECT;
+   if(InpDailyDrawdown < 0.0)
       return INIT_PARAMETERS_INCORRECT;
    if(InpBandsPeriod < 2 || InpBandsDeviation <= 0.0)
       return INIT_PARAMETERS_INCORRECT;
