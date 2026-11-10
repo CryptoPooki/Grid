@@ -3,7 +3,7 @@
 //|                                         Dynamic Bollinger grid   |
 //+------------------------------------------------------------------+
 #property copyright "Grid"
-#property version   "1.23"
+#property version   "1.26"
 #property description "Flattens the account for the rest of the server day after a 9000 daily equity drop."
 #property description "Keeps the full grid, and sends only the nearest pending orders on each side."
 #property description "Optional weekend mode trades Saturday and Sunday, then reduce-only on weekdays."
@@ -23,9 +23,9 @@ enum ENUM_NEWS_CURRENCIES
 };
 
 input group "Budget"
-input double InpMarginCap = 12000.0; // Maximum grid margin
-input double InpBuyMarginDivisor  = 40.0;     // Buy margin divisor
-input double InpSellMarginDivisor = 80.0;     // Sell margin divisor
+input double InpGridMargin        = 12000.0; // Grid margin
+input double InpBuyMarginDivisor  = 40.0;    // Buy margin divisor
+input double InpSellMarginDivisor = 80.0;    // Sell margin divisor
 
 input group "Bollinger bands"
 input ENUM_TIMEFRAMES InpTimeframe = PERIOD_H4; // Band timeframe
@@ -60,7 +60,6 @@ input int  InpMaintainSeconds        = 2;      // How often to check the grid, s
 input bool InpDrawGrid               = true;   // Draw bands and order levels
 input bool InpDeletePendingOnRemove  = false;  // Delete pending orders when the EA is removed
 
-#define EQUITY_RESERVE        180000.0
 #define OBJ_PREFIX            "BBG."
 #define MAX_REQUESTS_PER_PASS 10
 #define GRID_ORDERS_PER_SECOND 2
@@ -82,7 +81,6 @@ double   g_openLoss = 0.0;
 double   g_buyFloating = 0.0;
 double   g_sellFloating = 0.0;
 double   g_margin = 0.0;
-double   g_equityAtRefresh = 0.0;
 double   g_upper = 0.0;
 double   g_middle = 0.0;
 double   g_lower = 0.0;
@@ -401,10 +399,7 @@ bool EnsureState()
       return g_ready;
 
    const double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   g_equityAtRefresh = equity;
-   g_margin = equity - EQUITY_RESERVE;
-   if(g_margin > InpMarginCap)
-      g_margin = InpMarginCap;
+   g_margin = InpGridMargin;
    g_barTime = barOpen;
    g_ready = true;
    g_realign = true;
@@ -415,11 +410,9 @@ bool EnsureState()
    ArrayInitialize(g_buyLots, -1.0);
    ArrayInitialize(g_sellLots, -1.0);
 
-   PrintFormat("DynamicGridBB refresh. Equity %s, reserve %s, margin %s, cap %s. Lower %s, middle %s, upper %s.",
+   PrintFormat("DynamicGridBB refresh. Equity %s, margin %s. Lower %s, middle %s, upper %s.",
                DoubleToString(equity, MoneyDigits()),
-               DoubleToString(EQUITY_RESERVE, MoneyDigits()),
                DoubleToString(g_margin, MoneyDigits()),
-               DoubleToString(InpMarginCap, MoneyDigits()),
                DoubleToString(g_lower, _Digits),
                DoubleToString(g_middle, _Digits),
                DoubleToString(g_upper, _Digits));
@@ -748,10 +741,7 @@ int DeleteUnexpectedPending()
 //+------------------------------------------------------------------+
 double ReduceOnlyGap()
 {
-   double budget = AccountInfoDouble(ACCOUNT_EQUITY) - EQUITY_RESERVE;
-   if(budget > InpMarginCap)
-      budget = InpMarginCap;
-   return budget / 2.0;
+   return InpGridMargin / 2.0;
 }
 
 bool WeekendReduceOnly()
@@ -2061,13 +2051,10 @@ void ShowStatus(const string note)
    const string buyMode = SideBlocked(true) ? "reduce-only" : "trading";
    const string sellMode = SideBlocked(false) ? "reduce-only" : "trading";
    const double equityNow = AccountInfoDouble(ACCOUNT_EQUITY);
-   string text = StringFormat("Dynamic BB grid  %s\nEquity now %s | Reserve %s\nGrid margin %s = min(snapshot equity %s - reserve, cap %s)\nBuy/order %s | Sell/order %s | Full grid %s | Free %s\nOpen loss %s | Buys %s | Sells %s\nReduce-only gap %s = capped margin / 2 | Buy %s | Sell %s\nLower %s | EMA %s | Upper %s\nPending %d | Positions %d | Bands from %s",
+   string text = StringFormat("Dynamic BB grid  %s\nEquity now %s\nGrid margin %s\nBuy/order %s | Sell/order %s | Full grid %s | Free %s\nOpen loss %s | Buys %s | Sells %s\nReduce-only gap %s = grid margin / 2 | Buy %s | Sell %s\nLower %s | EMA %s | Upper %s\nPending %d | Positions %d | Bands from %s",
                               _Symbol,
                               DoubleToString(equityNow, digits),
-                              DoubleToString(EQUITY_RESERVE, digits),
                               DoubleToString(g_margin, digits),
-                              DoubleToString(g_equityAtRefresh, digits),
-                              DoubleToString(InpMarginCap, digits),
                               DoubleToString(buyMoney, digits),
                               DoubleToString(sellMoney, digits),
                               DoubleToString(gridMargin, digits),
@@ -2200,21 +2187,6 @@ void RunGrid()
       return;
    }
 
-   if(g_margin <= 0.0)
-   {
-      if(g_savedCount <= 0)
-      {
-         g_holdRestore = false;
-         g_restoring = false;
-         ClearSavedBook();
-      }
-      const int deleted = DeleteAllOurPending();
-      ShowStatus("Equity is at or below the reserve. No new grid orders.");
-      if(deleted > 0)
-         PrintFormat("DynamicGridBB removed %d pending orders because margin is %.2f.", deleted, g_margin);
-      return;
-   }
-
    if(g_holdRestore)
    {
       g_holdRestore = false;
@@ -2295,7 +2267,7 @@ void Maintain(const bool force)
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   if(InpMarginCap <= 0.0 || InpBuyMarginDivisor <= 0.0 || InpSellMarginDivisor <= 0.0)
+   if(InpGridMargin <= 0.0 || InpBuyMarginDivisor <= 0.0 || InpSellMarginDivisor <= 0.0)
       return INIT_PARAMETERS_INCORRECT;
    if(InpDailyDrawdown < 0.0)
       return INIT_PARAMETERS_INCORRECT;
