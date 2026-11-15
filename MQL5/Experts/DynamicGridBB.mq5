@@ -3,17 +3,17 @@
 //|                                         Dynamic Bollinger grid   |
 //+------------------------------------------------------------------+
 #property copyright "Grid"
-#property version   "1.27"
-#property description "Tilts buy and sell size with the 4H EMA slope. A tilt of 0 keeps each side on its own divisor."
-#property description "Flattens the account for the rest of the server day after a 9000 daily equity drop."
-#property description "Keeps the full grid, and sends only the nearest pending orders on each side."
-#property description "Optional weekend mode trades Saturday and Sunday, then reduce-only on weekdays."
-#property description "Writes balance, equity, and floating profit on a chosen timeframe."
-#property description "Dynamic grid on 4H EMA Bollinger Bands (length 21, 3 standard deviations)."
-#property description "Limit orders only. Buy levels above the ask are skipped. Sell levels below the bid are skipped."
-#property description "Flattens the book around selected high-impact EUR and USD releases."
-#property description "Flattens the book outside the symbol trade sessions, and across Saturday and Sunday."
-#property description "When the session reopens, the closed positions return with the same volume and take profit."
+#property version   "1.28"
+#property description "4H EMA slope tilts size. Tilt 0 keeps each divisor."
+#property description "Flattens for the day after a 9000 equity drop."
+#property description "Sends only the nearest pending orders on each side."
+#property description "Weekend mode trades Sat-Sun, then reduce-only."
+#property description "Writes balance, equity, and floating profit."
+#property description "Grid on 4H EMA bands, length 21, 3 deviations."
+#property description "Limit orders only. Wrong-side levels are skipped."
+#property description "Flattens around selected high-impact EUR and USD news."
+#property description "Flattens outside trade sessions and on weekends."
+#property description "Reopens saved positions with the same volume and target."
 
 #include <Trade/Trade.mqh>
 
@@ -68,6 +68,7 @@ input bool InpDeletePendingOnRemove  = false;  // Delete pending orders when the
 #define BLACKOUT_SECONDS      300
 #define TILT_PERIOD           21
 #define TILT_DEVIATION        3.0
+#define TILT_READY_BARS       (TILT_PERIOD + 22)
 
 CTrade   g_trade;
 int      g_maHandle = INVALID_HANDLE;
@@ -252,11 +253,8 @@ double LevelPrice(const bool isBuy, const int index)
    return NormalizePrice(g_upper - index * GridStep(false));
 }
 
-double TakeProfitPrice(const bool isBuy, const double entry)
+double ClampTakeProfit(const bool isBuy, const double entry, double tp)
 {
-   const double distance = entry * InpTakeProfitPercent / 100.0;
-   double tp = isBuy ? entry + distance : entry - distance;
-
    const double minDist = StopsDistance();
    if(minDist > 0.0)
    {
@@ -273,6 +271,13 @@ double TakeProfitPrice(const bool isBuy, const double entry)
    if(!isBuy && tp >= entry)
       tp = NormalizePrice(entry - tick);
    return tp;
+}
+
+double TakeProfitPrice(const bool isBuy, const double entry)
+{
+   const double distance = entry * InpTakeProfitPercent / 100.0;
+   const double tp = isBuy ? entry + distance : entry - distance;
+   return ClampTakeProfit(isBuy, entry, tp);
 }
 
 ENUM_ORDER_TYPE_FILLING DetectFilling()
@@ -356,9 +361,24 @@ bool DirectionAllowed(const bool isBuy)
    return true;
 }
 
+// Population deviation of closes around one center, matching the band width.
+double PopulationDeviation(const double &values[], const int count, const double center)
+{
+   if(count <= 0)
+      return 0.0;
+
+   double sum = 0.0;
+   for(int i = 0; i < count; ++i)
+   {
+      const double delta = values[i] - center;
+      sum += delta * delta;
+   }
+   return MathSqrt(sum / count);
+}
+
 //+------------------------------------------------------------------+
-//| Bands: middle is the 4H EMA. Width is 3 population deviations    |
-//| of the last N closed closes around that EMA.                    |
+//| Bands: middle is the EMA. Width is N population deviations of    |
+//| the last N closed closes around that EMA.                        |
 //+------------------------------------------------------------------+
 bool ComputeBands()
 {
@@ -377,14 +397,7 @@ bool ComputeBands()
    if(CopyClose(_Symbol, InpTimeframe, 1, InpBandsPeriod, closes) != InpBandsPeriod)
       return false;
 
-   double sum = 0.0;
-   for(int i = 0; i < InpBandsPeriod; ++i)
-   {
-      const double delta = closes[i] - ema[0];
-      sum += delta * delta;
-   }
-
-   const double deviation = MathSqrt(sum / InpBandsPeriod);
+   const double deviation = PopulationDeviation(closes, InpBandsPeriod, ema[0]);
    const double middle = ema[0];
    const double upper = middle + InpBandsDeviation * deviation;
    const double lower = middle - InpBandsDeviation * deviation;
@@ -413,11 +426,7 @@ bool EnsureState()
    g_ready = true;
    g_realign = true;
    g_lastError = "";
-
-   ArrayResize(g_buyLots, InpGridLevels);
-   ArrayResize(g_sellLots, InpGridLevels);
-   ArrayInitialize(g_buyLots, -1.0);
-   ArrayInitialize(g_sellLots, -1.0);
+   ResetLotCache();
 
    PrintFormat("DynamicGridBB refresh. Equity %s, margin %s. Lower %s, middle %s, upper %s.",
                DoubleToString(equity, MoneyDigits()),
@@ -487,16 +496,22 @@ void ApplyTrendTilt(const double slope)
    g_sellFraction = total * sellWeight / weightSum;
 }
 
+bool FractionChanged(const double before, const double after)
+{
+   const double scale = MathMax(MathAbs(before), MathAbs(after));
+   return MathAbs(before - after) > MathMax(scale * 1e-9, 1e-12);
+}
+
 bool RefreshTrendRatio()
 {
    const datetime barOpen = iTime(_Symbol, PERIOD_H4, 0);
    if(barOpen <= 0)
       return false;
-   if(g_tiltBarTime == barOpen && g_buyFraction > 0.0)
+   if(g_tiltBarTime == barOpen)
       return true;
-   if(BarsCalculated(g_tiltMaHandle) < TILT_PERIOD + 22)
+   if(BarsCalculated(g_tiltMaHandle) < TILT_READY_BARS)
       return false;
-   if(Bars(_Symbol, PERIOD_H4) < TILT_PERIOD + 22)
+   if(Bars(_Symbol, PERIOD_H4) < TILT_READY_BARS)
       return false;
 
    double ema[];
@@ -509,14 +524,7 @@ bool RefreshTrendRatio()
    if(CopyClose(_Symbol, PERIOD_H4, 1, TILT_PERIOD, closes) != TILT_PERIOD)
       return false;
 
-   double sum = 0.0;
-   for(int i = 0; i < TILT_PERIOD; ++i)
-   {
-      const double delta = closes[i] - ema[0];
-      sum += delta * delta;
-   }
-
-   const double deviation = MathSqrt(sum / TILT_PERIOD);
+   const double deviation = PopulationDeviation(closes, TILT_PERIOD, ema[0]);
    const double band = TILT_DEVIATION * deviation;
    double slope = 0.0;
    if(band > 0.0)
@@ -526,10 +534,12 @@ bool RefreshTrendRatio()
    if(slope < -1.0)
       slope = -1.0;
 
-   const bool resizeOrders = (g_tiltBarTime != 0 && g_tiltBarTime != barOpen);
+   const double previousBuy = g_buyFraction;
+   const double previousSell = g_sellFraction;
+   const bool laterBar = (g_tiltBarTime != 0);
    ApplyTrendTilt(slope);
    g_tiltBarTime = barOpen;
-   if(resizeOrders)
+   if(laterBar && (FractionChanged(previousBuy, g_buyFraction) || FractionChanged(previousSell, g_sellFraction)))
    {
       g_realign = true;
       ResetLotCache();
@@ -731,6 +741,48 @@ bool SendMarket(const bool isBuy, const double lots, const double sl, const doub
    return g_trade.Sell(lots, _Symbol, 0.0, sl, tp, comment);
 }
 
+bool TrySend(const bool market, const bool isBuy, const ENUM_ORDER_TYPE type,
+             const double lots, const double price, const double sl, const double tp,
+             const string comment, const string failurePrefix)
+{
+   ENUM_ORDER_TYPE_FILLING modes[3];
+   modes[0] = g_filling;
+   modes[1] = ORDER_FILLING_RETURN;
+   modes[2] = ORDER_FILLING_IOC;
+
+   for(int i = 0; i < 3; ++i)
+   {
+      if(i > 0 && modes[i] == modes[0])
+         continue;
+
+      g_trade.SetTypeFilling(modes[i]);
+      const bool sent = market ? SendMarket(isBuy, lots, sl, tp, comment)
+                               : SendOnce(type, lots, price, tp, comment);
+      if(sent)
+      {
+         g_filling = modes[i];
+         return true;
+      }
+
+      if(g_trade.ResultRetcode() == TRADE_RETCODE_LIMIT_ORDERS)
+      {
+         g_slotLimited = true;
+         return false;
+      }
+
+      if(g_trade.ResultRetcode() != TRADE_RETCODE_INVALID_FILL)
+      {
+         LogError(failurePrefix + ": " + g_trade.ResultRetcodeDescription());
+         PauseAfterTradeError();
+         return false;
+      }
+   }
+
+   LogError("Broker rejected the order filling mode.");
+   PauseAfterTradeError();
+   return false;
+}
+
 bool PlacePending(const ENUM_ORDER_TYPE type, const double lots, const double price,
                   const double tp, const string comment)
 {
@@ -751,46 +803,13 @@ bool PlacePending(const ENUM_ORDER_TYPE type, const double lots, const double pr
    if(!ConsumeRequest())
       return false;
 
-   ENUM_ORDER_TYPE_FILLING modes[3];
-   modes[0] = g_filling;
-   modes[1] = ORDER_FILLING_RETURN;
-   modes[2] = ORDER_FILLING_IOC;
-
-   for(int i = 0; i < 3; ++i)
-   {
-      if(i > 0 && modes[i] == modes[0])
-         continue;
-
-      g_trade.SetTypeFilling(modes[i]);
-      if(SendOnce(type, lots, price, tp, comment))
-      {
-         g_filling = modes[i];
-         return true;
-      }
-
-      if(g_trade.ResultRetcode() == TRADE_RETCODE_LIMIT_ORDERS)
-      {
-         g_slotLimited = true;
-         return false;
-      }
-
-      if(g_trade.ResultRetcode() != TRADE_RETCODE_INVALID_FILL)
-      {
-         LogError(StringFormat("%s %s failed at %s (%s lots, TP %s): %s",
+   return TrySend(false, false, type, lots, price, 0.0, tp, comment,
+                  StringFormat("%s %s failed at %s (%s lots, TP %s)",
                                comment,
                                EnumToString(type),
                                DoubleToString(price, _Digits),
                                DoubleToString(lots, 4),
-                               DoubleToString(tp, _Digits),
-                               g_trade.ResultRetcodeDescription()));
-         PauseAfterTradeError();
-         return false;
-      }
-   }
-
-   LogError("Broker rejected the order filling mode.");
-   PauseAfterTradeError();
-   return false;
+                               DoubleToString(tp, _Digits)));
 }
 
 bool DeletePending(const ulong ticket)
@@ -1275,7 +1294,7 @@ bool NewsCurrency(const string currency)
    return (InpNewsCurrencies == NEWS_USD_AND_EUR && code == "EUR");
 }
 
-bool ManagedByNews(const bool wholeAccount, const bool position)
+bool BookMatches(const bool wholeAccount, const bool position)
 {
    if(wholeAccount)
       return true;
@@ -1405,48 +1424,48 @@ void RefreshNewsCache()
    g_inNews = nowInNews;
 }
 
-int DeleteNewsOrders()
+int DeleteMatchedOrders(const bool wholeAccount, const string reason)
 {
    int deleted = 0;
    for(int i = OrdersTotal() - 1; i >= 0; --i)
    {
       const ulong ticket = OrderGetTicket(i);
-      if(ticket == 0 || !ManagedByNews(InpNewsWholeAccount, false))
+      if(ticket == 0 || !BookMatches(wholeAccount, false))
          continue;
       if(!ConsumeRequest())
          break;
       if(g_trade.OrderDelete(ticket))
          deleted++;
       else
-         LogError(StringFormat("Could not delete order %I64u for the news blackout: %s",
-                               ticket, g_trade.ResultRetcodeDescription()));
+         LogError(StringFormat("Could not delete order %I64u for %s: %s",
+                               ticket, reason, g_trade.ResultRetcodeDescription()));
    }
    return deleted;
 }
 
-int CloseNewsPositions()
+int CloseMatchedPositions(const bool wholeAccount, const string reason)
 {
    int closed = 0;
    for(int i = PositionsTotal() - 1; i >= 0; --i)
    {
       const ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || !ManagedByNews(InpNewsWholeAccount, true))
+      if(ticket == 0 || !BookMatches(wholeAccount, true))
          continue;
       if(!ConsumeRequest())
          break;
       if(g_trade.PositionClose(ticket, (ulong)InpSlippagePoints))
          closed++;
       else
-         LogError(StringFormat("Could not close position %I64u for the news blackout: %s",
-                               ticket, g_trade.ResultRetcodeDescription()));
+         LogError(StringFormat("Could not close position %I64u for %s: %s",
+                               ticket, reason, g_trade.ResultRetcodeDescription()));
    }
    return closed;
 }
 
 void EnforceNewsBlackout()
 {
-   const int deleted = DeleteNewsOrders();
-   const int closed = CloseNewsPositions();
+   const int deleted = DeleteMatchedOrders(InpNewsWholeAccount, "the news blackout");
+   const int closed = CloseMatchedPositions(InpNewsWholeAccount, "the news blackout");
    if(deleted + closed > 0)
    {
       PrintFormat("DynamicGridBB cleared %d order(s) and %d position(s) for %s %s.",
@@ -1461,6 +1480,36 @@ int DayStamp()
    return now.year * 10000 + now.mon * 100 + now.day;
 }
 
+string EmergencyEquityKey(const int day)
+{
+   return StringFormat("DGBB.%I64d.DayEquity.%d", AccountInfoInteger(ACCOUNT_LOGIN), day);
+}
+
+string EmergencyLatchKey(const int day)
+{
+   return StringFormat("DGBB.%I64d.Emergency.%d", AccountInfoInteger(ACCOUNT_LOGIN), day);
+}
+
+string LegacyEquityKey(const int day)
+{
+   return StringFormat("DGBB.DayEquity.%d", day);
+}
+
+string LegacyLatchKey(const int day)
+{
+   return StringFormat("DGBB.Emergency.%d", day);
+}
+
+void ForgetEmergencyDay(const int day)
+{
+   if(day <= 0)
+      return;
+   GlobalVariableDel(StringFormat("DGBB.DayEquity.%d", day));
+   GlobalVariableDel(StringFormat("DGBB.Emergency.%d", day));
+   GlobalVariableDel(EmergencyEquityKey(day));
+   GlobalVariableDel(EmergencyLatchKey(day));
+}
+
 void RefreshEmergency()
 {
    if(InpDailyDrawdown <= 0.0)
@@ -1473,14 +1522,21 @@ void RefreshEmergency()
    const int day = DayStamp();
    if(g_emergencyDay != day)
    {
+      ForgetEmergencyDay(g_emergencyDay);
       g_emergency = false;
       g_emergencyDay = day;
    }
 
-   const string equityKey = StringFormat("DGBB.DayEquity.%d", day);
-   const string latchKey = StringFormat("DGBB.Emergency.%d", day);
+   const string equityKey = EmergencyEquityKey(day);
+   const string latchKey = EmergencyLatchKey(day);
    if(!GlobalVariableCheck(equityKey))
-      GlobalVariableSet(equityKey, AccountInfoDouble(ACCOUNT_EQUITY));
+   {
+      const string legacyEquity = LegacyEquityKey(day);
+      const double baseline = GlobalVariableCheck(legacyEquity)
+                              ? GlobalVariableGet(legacyEquity)
+                              : AccountInfoDouble(ACCOUNT_EQUITY);
+      GlobalVariableSet(equityKey, baseline);
+   }
    g_dayEquity = GlobalVariableGet(equityKey);
 
    const double equity = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -1491,6 +1547,11 @@ void RefreshEmergency()
    const bool wasEmergency = g_emergency;
    if(GlobalVariableCheck(latchKey) && GlobalVariableGet(latchKey) > 0.5)
       g_emergency = true;
+   else if(GlobalVariableCheck(LegacyLatchKey(day)) && GlobalVariableGet(LegacyLatchKey(day)) > 0.5)
+   {
+      g_emergency = true;
+      GlobalVariableSet(latchKey, 1.0);
+   }
    if(g_dailyDrawdown >= InpDailyDrawdown)
    {
       g_emergency = true;
@@ -1504,48 +1565,10 @@ void RefreshEmergency()
    }
 }
 
-int DeleteEmergencyOrders()
-{
-   int deleted = 0;
-   for(int i = OrdersTotal() - 1; i >= 0; --i)
-   {
-      const ulong ticket = OrderGetTicket(i);
-      if(ticket == 0)
-         continue;
-      if(!ConsumeRequest())
-         break;
-      if(g_trade.OrderDelete(ticket))
-         deleted++;
-      else
-         LogError(StringFormat("Could not delete order %I64u for the emergency brake: %s",
-                               ticket, g_trade.ResultRetcodeDescription()));
-   }
-   return deleted;
-}
-
-int CloseEmergencyPositions()
-{
-   int closed = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; --i)
-   {
-      const ulong ticket = PositionGetTicket(i);
-      if(ticket == 0)
-         continue;
-      if(!ConsumeRequest())
-         break;
-      if(g_trade.PositionClose(ticket, (ulong)InpSlippagePoints))
-         closed++;
-      else
-         LogError(StringFormat("Could not close position %I64u for the emergency brake: %s",
-                               ticket, g_trade.ResultRetcodeDescription()));
-   }
-   return closed;
-}
-
 void EnforceEmergency()
 {
-   const int deleted = DeleteEmergencyOrders();
-   const int closed = CloseEmergencyPositions();
+   const int deleted = DeleteMatchedOrders(true, "the emergency brake");
+   const int closed = CloseMatchedPositions(true, "the emergency brake");
    if(deleted + closed > 0)
    {
       PrintFormat("DynamicGridBB emergency brake cleared %d order(s) and %d position(s).",
@@ -1829,22 +1852,7 @@ int SavedTakeProfit(const bool isBuy, const double savedTp, double &tp)
    if(!isBuy && savedTp >= entry)
       return -1;
 
-   tp = savedTp;
-   const double minDist = StopsDistance();
-   if(minDist > 0.0)
-   {
-      if(isBuy && (tp - entry) < minDist)
-         tp = entry + minDist;
-      if(!isBuy && (entry - tp) < minDist)
-         tp = entry - minDist;
-   }
-
-   tp = NormalizePrice(tp);
-   const double tickSize = TickSize();
-   if(isBuy && tp <= entry)
-      tp = NormalizePrice(entry + tickSize);
-   if(!isBuy && tp >= entry)
-      tp = NormalizePrice(entry - tickSize);
+   tp = ClampTakeProfit(isBuy, entry, savedTp);
    return 1;
 }
 
@@ -2027,44 +2035,11 @@ bool OpenRestored(const bool isBuy, const double lots, const double sl, const do
    if(!ConsumeRequest())
       return false;
 
-   ENUM_ORDER_TYPE_FILLING modes[3];
-   modes[0] = g_filling;
-   modes[1] = ORDER_FILLING_RETURN;
-   modes[2] = ORDER_FILLING_IOC;
-
-   for(int i = 0; i < 3; ++i)
-   {
-      if(i > 0 && modes[i] == modes[0])
-         continue;
-
-      g_trade.SetTypeFilling(modes[i]);
-      if(SendMarket(isBuy, lots, sl, tp, comment))
-      {
-         g_filling = modes[i];
-         return true;
-      }
-
-      if(g_trade.ResultRetcode() == TRADE_RETCODE_LIMIT_ORDERS)
-      {
-         g_slotLimited = true;
-         return false;
-      }
-
-      if(g_trade.ResultRetcode() != TRADE_RETCODE_INVALID_FILL)
-      {
-         LogError(StringFormat("Could not restore %s (%s lots, TP %s): %s",
+   return TrySend(true, isBuy, market, lots, price, sl, tp, comment,
+                  StringFormat("Could not restore %s (%s lots, TP %s)",
                                comment,
                                DoubleToString(lots, 4),
-                               DoubleToString(tp, _Digits),
-                               g_trade.ResultRetcodeDescription()));
-         PauseAfterTradeError();
-         return false;
-      }
-   }
-
-   LogError("Broker rejected the order filling mode.");
-   PauseAfterTradeError();
-   return false;
+                               DoubleToString(tp, _Digits)));
 }
 
 // One saved position per pass. Skipped legs do not use a trade request.
@@ -2120,48 +2095,10 @@ bool RestoreSavedPositions()
    return false;
 }
 
-int DeleteSessionOrders()
-{
-   int deleted = 0;
-   for(int i = OrdersTotal() - 1; i >= 0; --i)
-   {
-      const ulong ticket = OrderGetTicket(i);
-      if(ticket == 0 || !IsOurOrder())
-         continue;
-      if(!ConsumeRequest())
-         break;
-      if(g_trade.OrderDelete(ticket))
-         deleted++;
-      else
-         LogError(StringFormat("Could not delete order %I64u for the session blackout: %s",
-                               ticket, g_trade.ResultRetcodeDescription()));
-   }
-   return deleted;
-}
-
-int CloseSessionPositions()
-{
-   int closed = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; --i)
-   {
-      const ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || !IsOurPosition())
-         continue;
-      if(!ConsumeRequest())
-         break;
-      if(g_trade.PositionClose(ticket, (ulong)InpSlippagePoints))
-         closed++;
-      else
-         LogError(StringFormat("Could not close position %I64u for the session blackout: %s",
-                               ticket, g_trade.ResultRetcodeDescription()));
-   }
-   return closed;
-}
-
 void EnforceSessionBlackout()
 {
-   const int deleted = DeleteSessionOrders();
-   const int closed = CloseSessionPositions();
+   const int deleted = DeleteMatchedOrders(false, "the session blackout");
+   const int closed = CloseMatchedPositions(false, "the session blackout");
    if(deleted + closed > 0)
    {
       PrintFormat("DynamicGridBB cleared %d order(s) and %d position(s) for the session blackout.",
@@ -2423,11 +2360,18 @@ int OnInit()
       return INIT_FAILED;
    }
 
-   g_tiltMaHandle = iMA(_Symbol, PERIOD_H4, TILT_PERIOD, 0, MODE_EMA, PRICE_CLOSE);
-   if(g_tiltMaHandle == INVALID_HANDLE)
+   if(InpTimeframe == PERIOD_H4 && InpBandsPeriod == TILT_PERIOD)
+      g_tiltMaHandle = g_maHandle;
+   else
    {
-      Print("DynamicGridBB: failed to create the 4H EMA. Error ", GetLastError());
-      return INIT_FAILED;
+      g_tiltMaHandle = iMA(_Symbol, PERIOD_H4, TILT_PERIOD, 0, MODE_EMA, PRICE_CLOSE);
+      if(g_tiltMaHandle == INVALID_HANDLE)
+      {
+         Print("DynamicGridBB: failed to create the 4H EMA. Error ", GetLastError());
+         IndicatorRelease(g_maHandle);
+         g_maHandle = INVALID_HANDLE;
+         return INIT_FAILED;
+      }
    }
 
    g_filling = DetectFilling();
@@ -2459,16 +2403,17 @@ void OnDeinit(const int reason)
       DeleteAllOurPending();
    }
 
+   if(g_tiltMaHandle != INVALID_HANDLE && g_tiltMaHandle != g_maHandle)
+   {
+      IndicatorRelease(g_tiltMaHandle);
+      g_tiltMaHandle = INVALID_HANDLE;
+   }
    if(g_maHandle != INVALID_HANDLE)
    {
       IndicatorRelease(g_maHandle);
       g_maHandle = INVALID_HANDLE;
    }
-   if(g_tiltMaHandle != INVALID_HANDLE)
-   {
-      IndicatorRelease(g_tiltMaHandle);
-      g_tiltMaHandle = INVALID_HANDLE;
-   }
+   g_tiltMaHandle = INVALID_HANDLE;
 }
 
 string EquityFileName()
